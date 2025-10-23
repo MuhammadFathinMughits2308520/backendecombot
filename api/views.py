@@ -1,8 +1,10 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from django.contrib.auth.models import User
+from .models import Feedback
 from django.db import IntegrityError
-from .serializers import UserSerializer
+from .serializers import UserSerializer, FeedbackSerializer
+from rest_framework_simplejwt.views import TokenVerifyView
 
 @api_view(['POST'])
 def register(request):
@@ -21,7 +23,7 @@ def register(request):
     except IntegrityError:
         return Response({'error': 'Username already exists'}, status=400)
 
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.decorators import permission_classes
 
 @api_view(['GET'])
@@ -184,3 +186,36 @@ def comic_mark_finish(request):
             },
             status=status.HTTP_403_FORBIDDEN
         )
+
+@api_view(['POST', 'GET'])
+@permission_classes([AllowAny])  # ✅ tidak perlu login
+def feedback_view(request):
+    if request.method == 'POST':
+        serializer = FeedbackSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({'message': 'Feedback berhasil dikirim!'}, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'GET':
+        feedbacks = Feedback.objects.all().order_by('-tanggal')
+        serializer = FeedbackSerializer(feedbacks, many=True)
+        return Response(serializer.data)
+
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            refresh_token = request.data.get("refresh")
+            if not refresh_token:
+                return Response({"detail": "Refresh token tidak diberikan"}, status=status.HTTP_400_BAD_REQUEST)
+
+            token = RefreshToken(refresh_token)
+            token.blacklist()  # blacklist token agar tidak bisa dipakai lagi
+            return Response({"detail": "Logout berhasil"}, status=status.HTTP_205_RESET_CONTENT)
+        except TokenError:
+            return Response({"detail": "Token tidak valid atau sudah kadaluarsa"}, status=status.HTTP_400_BAD_REQUEST)

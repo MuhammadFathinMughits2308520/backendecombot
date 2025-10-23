@@ -31,4 +31,13 @@ class UserComicProgress(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.comic_slug} ({self.last_page})"
+    
+class Feedback(models.Model):
+    nama = models.CharField(max_length=100, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    pesan = models.TextField()
+    tanggal = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Feedback dari {self.nama or 'Anonim'} ({self.tanggal.strftime('%Y-%m-%d')})"
 
