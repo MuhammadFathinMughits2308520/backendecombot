@@ -1371,15 +1371,17 @@ def complete_activity(request):
             'message': 'Gagal menandai activity sebagai selesai'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-from django.core.paginator import Paginator
-from django.db.models import Q, Count
-from .models import User, ChatSession, UserAnswer, ActivityProgress, UserProgress
 
-def _int_or_default(val, default):
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+from django.db.models import Q
+
+def _int_or_default(value, default):
+    """Helper function to safely parse integer"""
     try:
-        return int(val)
-    except (TypeError, ValueError):
+        return int(value) if value else default
+    except (ValueError, TypeError):
         return default
+
 
 @api_view(["GET"])
 def teacher_answers(request):
@@ -1394,69 +1396,89 @@ def teacher_answers(request):
       - page, page_size
       - ordering: created_at or -created_at
     """
-    qs = UserAnswer.objects.select_related("user", "activity").order_by("-created_at")
+    try:
+        qs = UserAnswer.objects.select_related("user", "activity").all()
 
-    q = request.GET.get("q")
-    activity = request.GET.get("activity")
-    answer_type = request.GET.get("answer_type")
-    date_from = request.GET.get("date_from")
-    date_to = request.GET.get("date_to")
-    ungraded = request.GET.get("ungraded")
-    ordering = request.GET.get("ordering", "-created_at")
+        q = request.GET.get("q")
+        activity = request.GET.get("activity")
+        answer_type = request.GET.get("answer_type")
+        date_from = request.GET.get("date_from")
+        date_to = request.GET.get("date_to")
+        ungraded = request.GET.get("ungraded")
+        ordering = request.GET.get("ordering", "-created_at")
 
-    if q:
-        qs = qs.filter(
-            Q(user__username__icontains=q) |
-            Q(answer_text__icontains=q) |
-            Q(question_text__icontains=q)
+        if q:
+            qs = qs.filter(
+                Q(user__username__icontains=q) |
+                Q(answer_text__icontains=q) |
+                Q(question_text__icontains=q)
+            )
+        if activity:
+            qs = qs.filter(activity__title__icontains=activity)
+        if answer_type:
+            qs = qs.filter(answer_type=answer_type)
+        if date_from:
+            qs = qs.filter(created_at__date__gte=date_from)
+        if date_to:
+            qs = qs.filter(created_at__date__lte=date_to)
+        # optional: requires that model has is_graded boolean
+        if ungraded and ungraded.lower() in ("1", "true", "yes"):
+            if hasattr(UserAnswer, "is_graded"):
+                qs = qs.filter(is_graded=False)
+
+        # ordering - validate to prevent SQL injection
+        if ordering in ['created_at', '-created_at']:
+            qs = qs.order_by(ordering)
+        else:
+            qs = qs.order_by("-created_at")
+
+        # pagination
+        page = _int_or_default(request.GET.get("page"), 1)
+        page_size = _int_or_default(request.GET.get("page_size"), 25)
+        paginator = Paginator(qs, page_size)
+        
+        try:
+            page_obj = paginator.get_page(page)
+        except Exception as e:
+            return Response(
+                {"error": f"Pagination error: {str(e)}"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        data = []
+        start_no = (page_obj.number - 1) * page_size + 1
+        for idx, a in enumerate(page_obj.object_list, start=start_no):
+            data.append({
+                "no": idx,
+                "nama_siswa": getattr(a.user, "username", "-") if a.user else "-",
+                "kegiatan": getattr(a.activity, "title", "-") if a.activity else "-",
+                "jenis_pertanyaan": getattr(a, "answer_type", "text"),
+                "pertanyaan": getattr(a, "question_text", ""),
+                "jawaban_siswa": getattr(a, "answer_text", ""),
+                "tipe_jawaban": getattr(a, "answer_type", ""),
+                "tanggal_dikirim": a.created_at.strftime("%Y-%m-%d %H:%M") if a.created_at else "",
+                # optional grading fields (if exist)
+                "is_graded": getattr(a, "is_graded", None),
+                "score": getattr(a, "score", None),
+                "grader_comment": getattr(a, "grader_comment", None),
+            })
+
+        meta = {
+            "page": page_obj.number,
+            "page_size": page_size,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+        }
+        return Response({"meta": meta, "results": data}, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        import traceback
+        print("ERROR in teacher_answers:", str(e))
+        print(traceback.format_exc())
+        return Response(
+            {"error": str(e), "detail": "Internal server error"}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-    if activity:
-        qs = qs.filter(activity__title__icontains=activity)
-    if answer_type:
-        qs = qs.filter(answer_type=answer_type)
-    if date_from:
-        qs = qs.filter(created_at__date__gte=date_from)
-    if date_to:
-        qs = qs.filter(created_at__date__lte=date_to)
-    # optional: requires that model has is_graded boolean
-    if ungraded and ungraded.lower() in ("1", "true", "yes"):
-        if hasattr(UserAnswer, "is_graded"):
-            qs = qs.filter(is_graded=False)
-
-    # ordering
-    qs = qs.order_by(ordering)
-
-    # pagination
-    page = _int_or_default(request.GET.get("page"), 1)
-    page_size = _int_or_default(request.GET.get("page_size"), 25)
-    paginator = Paginator(qs, page_size)
-    page_obj = paginator.get_page(page)
-
-    data = []
-    start_no = (page_obj.number - 1) * page_size + 1
-    for idx, a in enumerate(page_obj.object_list, start=start_no):
-        data.append({
-            "no": idx,
-            "nama_siswa": getattr(a.user, "username", "-"),
-            "kegiatan": getattr(a.activity, "title", "-") if getattr(a, "activity", None) else "-",
-            "jenis_pertanyaan": getattr(a, "answer_type", "text"),
-            "pertanyaan": getattr(a, "question_text", ""),
-            "jawaban_siswa": getattr(a, "answer_text", ""),
-            "tipe_jawaban": getattr(a, "answer_type", ""),
-            "tanggal_dikirim": a.created_at.strftime("%Y-%m-%d %H:%M") if a.created_at else "",
-            # optional grading fields (if exist)
-            "is_graded": getattr(a, "is_graded", None),
-            "score": getattr(a, "score", None),
-            "grader_comment": getattr(a, "grader_comment", None),
-        })
-
-    meta = {
-        "page": page_obj.number,
-        "page_size": page_size,
-        "total_pages": paginator.num_pages,
-        "total_items": paginator.count,
-    }
-    return Response({"meta": meta, "results": data}, status=status.HTTP_200_OK)
 
 
 @api_view(["GET"])
@@ -1471,67 +1493,90 @@ def teacher_dashboard(request):
       - chat_status (Completed/Active)
       - page, page_size
     """
-    users = User.objects.all()
+    try:
+        users = User.objects.all()
 
-    username = request.GET.get("username")
-    komik = request.GET.get("komik")
-    status_komik = request.GET.get("status_komik")
-    chat_status = request.GET.get("chat_status")
-    min_answers = request.GET.get("min_answers")
-    max_answers = request.GET.get("max_answers")
+        username = request.GET.get("username")
+        komik = request.GET.get("komik")
+        status_komik = request.GET.get("status_komik")
+        chat_status = request.GET.get("chat_status")
+        min_answers = request.GET.get("min_answers")
+        max_answers = request.GET.get("max_answers")
 
-    if username:
-        users = users.filter(username__icontains=username)
+        if username:
+            users = users.filter(username__icontains=username)
 
-    data_list = []
-    for user in users:
-        session = ChatSession.objects.filter(user=user).order_by("-updated_at").first()
-        progress = UserProgress.objects.filter(user=user).first()
-        last_activity_progress = ActivityProgress.objects.filter(user=user).order_by("-updated_at").first()
-        total_answers = UserAnswer.objects.filter(user=user).count()
-
-        komik_title = last_activity_progress.activity.title if (last_activity_progress and getattr(last_activity_progress, "activity", None)) else "-"
-        status_komik_val = "Selesai" if (last_activity_progress and getattr(last_activity_progress, "status", "") == "completed") else "Belum"
-        chat_status_val = session.status if session else "-"
-
-        # apply per-row filters:
-        if komik and komik.lower() not in komik_title.lower():
-            continue
-        if status_komik and status_komik.lower() != status_komik_val.lower():
-            continue
-        if chat_status and chat_status.lower() != str(chat_status_val).lower():
-            continue
-        if min_answers:
+        data_list = []
+        for user in users:
             try:
-                if total_answers < int(min_answers): continue
-            except ValueError:
-                pass
-        if max_answers:
-            try:
-                if total_answers > int(max_answers): continue
-            except ValueError:
-                pass
+                session = ChatSession.objects.filter(user=user).order_by("-updated_at").first()
+                progress = UserProgress.objects.filter(user=user).first()
+                last_activity_progress = ActivityProgress.objects.filter(user=user).order_by("-updated_at").first()
+                total_answers = UserAnswer.objects.filter(user=user).count()
 
-        data_list.append({
-            "siswa": user.username,
-            "komik": komik_title,
-            "halaman_terakhir": getattr(progress, "current_kegiatan", "-") if progress else "-",
-            "status_komik": status_komik_val,
-            "chat_status": chat_status_val,
-            "kegiatan": getattr(last_activity_progress.activity, "title", "-") if last_activity_progress else "-",
-            "jawaban_terkumpul": total_answers,
-        })
+                komik_title = last_activity_progress.activity.title if (last_activity_progress and hasattr(last_activity_progress, 'activity') and last_activity_progress.activity) else "-"
+                status_komik_val = "Selesai" if (last_activity_progress and getattr(last_activity_progress, "status", "") == "completed") else "Belum"
+                chat_status_val = session.status if session else "-"
 
-    # simple pagination for dashboard
-    page = _int_or_default(request.GET.get("page"), 1)
-    page_size = _int_or_default(request.GET.get("page_size"), 25)
-    paginator = Paginator(data_list, page_size)
-    page_obj = paginator.get_page(page)
+                # apply per-row filters:
+                if komik and komik.lower() not in komik_title.lower():
+                    continue
+                if status_komik and status_komik.lower() != status_komik_val.lower():
+                    continue
+                if chat_status and chat_status.lower() != str(chat_status_val).lower():
+                    continue
+                if min_answers:
+                    try:
+                        if total_answers < int(min_answers): 
+                            continue
+                    except ValueError:
+                        pass
+                if max_answers:
+                    try:
+                        if total_answers > int(max_answers): 
+                            continue
+                    except ValueError:
+                        pass
 
-    meta = {
-        "page": page_obj.number,
-        "page_size": page_size,
-        "total_pages": paginator.num_pages,
-        "total_items": paginator.count,
-    }
-    return Response({"meta": meta, "results": list(page_obj)}, status=status.HTTP_200_OK)
+                data_list.append({
+                    "siswa": user.username,
+                    "komik": komik_title,
+                    "halaman_terakhir": getattr(progress, "current_kegiatan", "-") if progress else "-",
+                    "status_komik": status_komik_val,
+                    "chat_status": chat_status_val,
+                    "kegiatan": getattr(last_activity_progress.activity, "title", "-") if (last_activity_progress and hasattr(last_activity_progress, 'activity') and last_activity_progress.activity) else "-",
+                    "jawaban_terkumpul": total_answers,
+                })
+            except Exception as e:
+                print(f"Error processing user {user.username}: {str(e)}")
+                continue
+
+        # simple pagination for dashboard
+        page = _int_or_default(request.GET.get("page"), 1)
+        page_size = _int_or_default(request.GET.get("page_size"), 25)
+        paginator = Paginator(data_list, page_size)
+        
+        try:
+            page_obj = paginator.get_page(page)
+        except Exception as e:
+            return Response(
+                {"error": f"Pagination error: {str(e)}"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        meta = {
+            "page": page_obj.number,
+            "page_size": page_size,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+        }
+        return Response({"meta": meta, "results": list(page_obj)}, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        import traceback
+        print("ERROR in teacher_dashboard:", str(e))
+        print(traceback.format_exc())
+        return Response(
+            {"error": str(e), "detail": "Internal server error"}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
