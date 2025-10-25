@@ -533,7 +533,6 @@ except Exception as e:
     logger.error(f"❌ RAG system initialization error: {e}")
 
 # ===== VIEWS PERTAMA (EXISTING) =====
-
 @api_view(['POST'])
 def register(request):
     try:
@@ -551,12 +550,20 @@ def register(request):
     except IntegrityError:
         return Response({'error': 'Username already exists'}, status=400)
 
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.decorators import permission_classes
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def ecombot(request):
     return Response({
         "message": f"Halo, {request.user.username}! Ini halaman profil kamu."
     })
+
+
+from django.http import JsonResponse
+from django.conf import settings
+from .utils.cloudinary_utils import get_optimized_resources
 
 def manifest(request, comic_slug, episode_slug):
     prefix = f"comics/{comic_slug}/{episode_slug}"
@@ -579,7 +586,12 @@ def manifest(request, comic_slug, episode_slug):
     
     return JsonResponse(manifest)
 
-REQUIRED_PAGE_THRESHOLD = 3  # indeks (0-based)
+
+from .models import UserComicProgress
+
+from rest_framework import status
+
+REQUIRED_PAGE_THRESHOLD = 3  # indeks (0-based), berarti halaman ke-4
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
@@ -589,15 +601,30 @@ def comic_progress(request):
     if request.method == 'GET':
         comic = request.query_params.get('comic')
         episode = request.query_params.get('episode')
+        
         try:
-            progress = UserComicProgress.objects.get(user=user, comic_slug=comic, episode_slug=episode)
+            progress = UserComicProgress.objects.get(
+                user=user, 
+                comic_slug=comic, 
+                episode_slug=episode
+            )
+            
+            # Jika finish, allowed_page = unlimited (gunakan angka besar)
+            # Jika belum finish, allowed_page = 2 (index 0-2, yaitu halaman 1-3)
+            allowed_page = 999 if progress.finish else 2
+            
             return Response({
                 "finish": progress.finish,
-                "allowed_page": progress.last_page,
+                "allowed_page": allowed_page,
                 "last_page": progress.last_page
             })
         except UserComicProgress.DoesNotExist:
-            return Response({"finish": False, "allowed_page": 0, "last_page": 0})
+            # User baru, belum pernah baca komik ini
+            return Response({
+                "finish": False, 
+                "allowed_page": 2,  # hanya bisa sampai halaman ke-3 (index 2)
+                "last_page": 0
+            })
 
     # --- POST: update posisi halaman ---
     if request.method == 'POST':
@@ -615,17 +642,25 @@ def comic_progress(request):
             defaults={"last_page": 0, "finish": False}
         )
 
-        # Update last_page tapi jangan turunkan progress
+        # Update last_page hanya jika lebih besar (jangan turunkan progress)
         if last_page > progress.last_page:
             progress.last_page = last_page
 
         progress.save()
+        
+        # Kembalikan allowed_page yang benar
+        allowed_page = 999 if progress.finish else 2
 
         return Response({
             "saved": True,
             "finish": progress.finish,
+            "allowed_page": allowed_page,
             "last_page": progress.last_page
         })
+
+
+
+from rest_framework import status
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -666,6 +701,7 @@ def comic_mark_finish(request):
         progress.finish = True
         progress.save()
         return Response({"saved": True, "finish": True, "message": "Marked as complete by user"})
+
 
     # Force (untuk staff/admin)
     if force and user.is_staff:
@@ -711,6 +747,9 @@ def feedback_view(request):
         feedbacks = Feedback.objects.all().order_by('-tanggal')
         serializer = FeedbackSerializer(feedbacks, many=True)
         return Response(serializer.data)
+
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
