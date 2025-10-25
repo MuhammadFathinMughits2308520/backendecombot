@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["...", "pkgs.tesseract"]
+nixPkgs = ["...", "pkgs.tesseract", "pkgs.mysql.client"]

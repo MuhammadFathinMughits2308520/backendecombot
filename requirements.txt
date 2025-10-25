@@ -48,7 +48,7 @@ urllib3==2.5.0
 virtualenv==20.28.0
 xarray==2024.10.0
 whitenoise==6.6.0
-psycopg2-binary==2.9.9
+mysqlclient==2.2.6
 google-generativeai==0.3.0
 langchain-community==0.0.29
 langchain-core==0.1.33
