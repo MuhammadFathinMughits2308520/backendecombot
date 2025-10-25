@@ -1,0 +1,13 @@
+# Abaikan virtual environment
+.venv
+env
+venv
+
+# Abaikan cache Python
+__pycache__
+*.pyc
+
+# Abaikan file/folder sistem
+.git
+.vscode
+.idea
