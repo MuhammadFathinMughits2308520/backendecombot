@@ -1527,3 +1527,59 @@ def teacher_dashboard(request):
             {"error": str(e), "detail": "Internal server error"}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+    
+
+# Load environment variables
+load_dotenv()
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_teacher_password(request):
+    """
+    POST /api/teacher/verify-password/
+    Body: { "password": "your_password" }
+    
+    Verifikasi password guru dari .env file
+    """
+    try:
+        input_password = request.data.get('password', '')
+        
+        # Ambil password dari .env
+        correct_password = os.getenv('TEACHER_PASSWORD', 'greenverse2024')
+        
+        if not input_password:
+            return Response(
+                {
+                    'success': False,
+                    'message': 'Password tidak boleh kosong'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verifikasi password
+        if input_password == correct_password:
+            return Response(
+                {
+                    'success': True,
+                    'message': 'Password benar'
+                },
+                status=status.HTTP_200_OK
+            )
+        else:
+            return Response(
+                {
+                    'success': False,
+                    'message': 'Password salah'
+                },
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+            
+    except Exception as e:
+        print(f"Error in verify_teacher_password: {str(e)}")
+        return Response(
+            {
+                'success': False,
+                'message': 'Terjadi kesalahan server'
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

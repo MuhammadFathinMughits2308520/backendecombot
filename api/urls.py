@@ -14,6 +14,7 @@ urlpatterns = [
     path('comic-progress/finish/', views.comic_mark_finish, name='comic_mark_finish'),
     path('token/verify/', TokenVerifyView.as_view(), name='token_verify'),
     path('feedback/', views.feedback_view, name='feedback'),
+    path('teacher/verify-password/', views.verify_teacher_password, name='verify_teacher_password'),
     path("teacher/answers/", views.teacher_answers, name="teacher_answers"),
     path("teacher/dashboard/", views.teacher_dashboard, name="teacher_dashboard"),
 
