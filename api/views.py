@@ -1015,6 +1015,12 @@ def reload_rag_system(request):
 
 # ===== ENDPOINT FORCE RELOAD (ALIAS) =====
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def force_rag_reload(request):
+    """Alias for reload_rag_system for backward compatibility"""
+    return reload_rag_system(request)
+
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -1379,41 +1385,56 @@ def _int_or_default(value, default):
 
 @api_view(["GET"])
 def teacher_answers(request):
+    """
+    GET /api/teacher/answers/
+    Query params:
+      - q: search (username, question_text, answer_text)
+      - activity: activity title (icontains)
+      - answer_type: exact (e.g. "text", "image")
+      - date_from, date_to: YYYY-MM-DD
+      - ungraded: "1" or "true" -> only ungraded (requires `is_graded` field; if not exist, ignore)
+      - page, page_size
+      - ordering: created_at or -created_at
+    """
     try:
-        # Hapus select_related yang salah
-        qs = UserAnswer.objects.select_related("session__user").all()
+        qs = UserAnswer.objects.select_related("user", "activity").all()
 
         q = request.GET.get("q")
         activity = request.GET.get("activity")
         answer_type = request.GET.get("answer_type")
         date_from = request.GET.get("date_from")
         date_to = request.GET.get("date_to")
+        ungraded = request.GET.get("ungraded")
         ordering = request.GET.get("ordering", "-created_at")
 
         if q:
             qs = qs.filter(
-                Q(session__user__username__icontains=q) |
+                Q(user__username__icontains=q) |
                 Q(answer_text__icontains=q) |
                 Q(question_text__icontains=q)
             )
         if activity:
-            qs = qs.filter(activity_id__icontains=activity)
+            qs = qs.filter(activity__title__icontains=activity)
         if answer_type:
             qs = qs.filter(answer_type=answer_type)
         if date_from:
             qs = qs.filter(created_at__date__gte=date_from)
         if date_to:
             qs = qs.filter(created_at__date__lte=date_to)
+        # optional: requires that model has is_graded boolean
+        if ungraded and ungraded.lower() in ("1", "true", "yes"):
+            if hasattr(UserAnswer, "is_graded"):
+                qs = qs.filter(is_graded=False)
 
-        # ordering validation
+        # ordering - validate to prevent SQL injection
         if ordering in ['created_at', '-created_at']:
             qs = qs.order_by(ordering)
         else:
             qs = qs.order_by("-created_at")
 
         # pagination
-        page = int(request.GET.get("page", 1))
-        page_size = int(request.GET.get("page_size", 25))
+        page = _int_or_default(request.GET.get("page"), 1)
+        page_size = _int_or_default(request.GET.get("page_size"), 25)
         paginator = Paginator(qs, page_size)
         
         try:
@@ -1429,13 +1450,17 @@ def teacher_answers(request):
         for idx, a in enumerate(page_obj.object_list, start=start_no):
             data.append({
                 "no": idx,
-                "nama_siswa": a.session.user.username if a.session and a.session.user else "-",
-                "kegiatan": a.activity_id or "-",  # Gunakan activity_id karena bukan ForeignKey
-                "jenis_pertanyaan": a.answer_type or "text",
-                "pertanyaan": a.question_text or "",
-                "jawaban_siswa": a.answer_text or "",
-                "tipe_jawaban": a.answer_type or "",
+                "nama_siswa": getattr(a.user, "username", "-") if a.user else "-",
+                "kegiatan": getattr(a.activity, "title", "-") if a.activity else "-",
+                "jenis_pertanyaan": getattr(a, "answer_type", "text"),
+                "pertanyaan": getattr(a, "question_text", ""),
+                "jawaban_siswa": getattr(a, "answer_text", ""),
+                "tipe_jawaban": getattr(a, "answer_type", ""),
                 "tanggal_dikirim": a.created_at.strftime("%Y-%m-%d %H:%M") if a.created_at else "",
+                # optional grading fields (if exist)
+                "is_graded": getattr(a, "is_graded", None),
+                "score": getattr(a, "score", None),
+                "grader_comment": getattr(a, "grader_comment", None),
             })
 
         meta = {
@@ -1458,10 +1483,26 @@ def teacher_answers(request):
 
 @api_view(["GET"])
 def teacher_dashboard(request):
+    """
+    GET /api/teacher/dashboard/
+    Query params (optional):
+      - username
+      - komik (activity/comic title)
+      - min_answers, max_answers
+      - status_komik (Selesai/Belum)
+      - chat_status (Completed/Active)
+      - page, page_size
+    """
     try:
         users = User.objects.all()
 
         username = request.GET.get("username")
+        komik = request.GET.get("komik")
+        status_komik = request.GET.get("status_komik")
+        chat_status = request.GET.get("chat_status")
+        min_answers = request.GET.get("min_answers")
+        max_answers = request.GET.get("max_answers")
+
         if username:
             users = users.filter(username__icontains=username)
 
@@ -1470,40 +1511,58 @@ def teacher_dashboard(request):
             try:
                 session = ChatSession.objects.filter(user=user).order_by("-updated_at").first()
                 progress = UserProgress.objects.filter(user=user).first()
-                last_activity_progress = ActivityProgress.objects.filter(session__user=user).order_by("-updated_at").first()
-                total_answers = UserAnswer.objects.filter(session__user=user).count()
+                last_activity_progress = ActivityProgress.objects.filter(user=user).order_by("-updated_at").first()
+                total_answers = UserAnswer.objects.filter(user=user).count()
+
+                komik_title = last_activity_progress.activity.title if (last_activity_progress and hasattr(last_activity_progress, 'activity') and last_activity_progress.activity) else "-"
+                status_komik_val = "Selesai" if (last_activity_progress and getattr(last_activity_progress, "status", "") == "completed") else "Belum"
+                chat_status_val = session.status if session else "-"
+
+                # apply per-row filters:
+                if komik and komik.lower() not in komik_title.lower():
+                    continue
+                if status_komik and status_komik.lower() != status_komik_val.lower():
+                    continue
+                if chat_status and chat_status.lower() != str(chat_status_val).lower():
+                    continue
+                if min_answers:
+                    try:
+                        if total_answers < int(min_answers): 
+                            continue
+                    except ValueError:
+                        pass
+                if max_answers:
+                    try:
+                        if total_answers > int(max_answers): 
+                            continue
+                    except ValueError:
+                        pass
 
                 data_list.append({
                     "siswa": user.username,
-                    "komik": last_activity_progress.activity_id if last_activity_progress else "-",
-                    "halaman_terakhir": progress.current_kegiatan if progress else "-",
-                    "status_komik": "Selesai" if (last_activity_progress and last_activity_progress.status == "completed") else "Belum",
-                    "chat_status": session.status if session else "-",
-                    "kegiatan": last_activity_progress.activity_id if last_activity_progress else "-",
+                    "komik": komik_title,
+                    "halaman_terakhir": getattr(progress, "current_kegiatan", "-") if progress else "-",
+                    "status_komik": status_komik_val,
+                    "chat_status": chat_status_val,
+                    "kegiatan": getattr(last_activity_progress.activity, "title", "-") if (last_activity_progress and hasattr(last_activity_progress, 'activity') and last_activity_progress.activity) else "-",
                     "jawaban_terkumpul": total_answers,
                 })
             except Exception as e:
                 print(f"Error processing user {user.username}: {str(e)}")
                 continue
 
-        # Filter after building data
-        komik = request.GET.get("komik")
-        status_komik = request.GET.get("status_komik")
-        chat_status = request.GET.get("chat_status")
-        
-        if komik:
-            data_list = [d for d in data_list if komik.lower() in d['komik'].lower()]
-        if status_komik:
-            data_list = [d for d in data_list if d['status_komik'].lower() == status_komik.lower()]
-        if chat_status:
-            data_list = [d for d in data_list if str(d['chat_status']).lower() == chat_status.lower()]
-
-        # Pagination
-        page = int(request.GET.get("page", 1))
-        page_size = int(request.GET.get("page_size", 25))
+        # simple pagination for dashboard
+        page = _int_or_default(request.GET.get("page"), 1)
+        page_size = _int_or_default(request.GET.get("page_size"), 25)
         paginator = Paginator(data_list, page_size)
         
-        page_obj = paginator.get_page(page)
+        try:
+            page_obj = paginator.get_page(page)
+        except Exception as e:
+            return Response(
+                {"error": f"Pagination error: {str(e)}"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         meta = {
             "page": page_obj.number,
@@ -1519,61 +1578,5 @@ def teacher_dashboard(request):
         print(traceback.format_exc())
         return Response(
             {"error": str(e), "detail": "Internal server error"}, 
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-    
-
-# Load environment variables
-load_dotenv()
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def verify_teacher_password(request):
-    """
-    POST /api/teacher/verify-password/
-    Body: { "password": "your_password" }
-    
-    Verifikasi password guru dari .env file
-    """
-    try:
-        input_password = request.data.get('password', '')
-        
-        # Ambil password dari .env
-        correct_password = os.getenv('TEACHER_PASSWORD', 'greenverse2024')
-        
-        if not input_password:
-            return Response(
-                {
-                    'success': False,
-                    'message': 'Password tidak boleh kosong'
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Verifikasi password
-        if input_password == correct_password:
-            return Response(
-                {
-                    'success': True,
-                    'message': 'Password benar'
-                },
-                status=status.HTTP_200_OK
-            )
-        else:
-            return Response(
-                {
-                    'success': False,
-                    'message': 'Password salah'
-                },
-                status=status.HTTP_401_UNAUTHORIZED
-            )
-            
-    except Exception as e:
-        print(f"Error in verify_teacher_password: {str(e)}")
-        return Response(
-            {
-                'success': False,
-                'message': 'Terjadi kesalahan server'
-            },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
