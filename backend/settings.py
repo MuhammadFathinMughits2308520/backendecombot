@@ -10,7 +10,7 @@ import dj_database_url
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ----------------------------------------------------
-# 🔒 Keamanan
+# 🔒 Keamanan yang digunakan
 # ----------------------------------------------------
 load_dotenv()  # ambil dari file .env (lokal)
 
