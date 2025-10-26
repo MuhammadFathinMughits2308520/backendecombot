@@ -1015,12 +1015,6 @@ def reload_rag_system(request):
 
 # ===== ENDPOINT FORCE RELOAD (ALIAS) =====
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def force_rag_reload(request):
-    """Alias for reload_rag_system for backward compatibility"""
-    return reload_rag_system(request)
-
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
