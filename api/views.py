@@ -1436,7 +1436,7 @@ def teacher_answers(request):
             data.append({
                 "no": idx,
                 "nama_siswa": a.session.user.username if a.session and a.session.user else "-",
-                "kegiatan": a.activity_id or "-",  # Gunakan activity_id karena bukan ForeignKey
+                "kegiatan": a.step_id or a.activity_id or "-",  # Gunakan activity_id karena bukan ForeignKey
                 "jenis_pertanyaan": a.answer_type or "text",
                 "pertanyaan": a.question_text or "",
                 "jawaban_siswa": a.answer_text or "",
