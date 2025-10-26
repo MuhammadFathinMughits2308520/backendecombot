@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView, TokenVerifyView
 from . import views
 
+
 urlpatterns = [
     path('register/', views.register),
     path('login/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
@@ -25,9 +26,9 @@ urlpatterns = [
     path('chat/session/<str:session_id>/activity/<str:activity_id>/', views.get_activity_history, name='get_activity_history'),
     path('chat/session/<str:session_id>/overview/', views.get_session_overview, name='get_session_overview'),
     
-    # Activity Management - PERBAIKAN: Tambahkan endpoint yang hilang
+    # Activity Management
     path('chat/answer/submit/', views.submit_activity_answer, name='submit_activity_answer'),
-    path('chat/activity/complete/', views.complete_activity, name='complete_activity'), 
+    path('chat/activity/complete/', views.complete_activity, name='complete_activity'),
     
     # ===== DEBUG & HEALTH ENDPOINTS =====
     
@@ -37,5 +38,6 @@ urlpatterns = [
     # RAG System Debug
     path('debug-rag-status/', views.debug_rag_status, name='debug_rag_status'),
     path('reload-rag/', views.reload_rag_system, name='reload_rag_system'),
-    # Hapus duplikasi: path('force-reload-rag/', views.force_rag_reload, name='force_reload_rag'),
+    path('force-reload-rag/', views.force_rag_reload, name='force_reload_rag'),
+
 ]
