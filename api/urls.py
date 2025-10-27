@@ -17,6 +17,7 @@ urlpatterns = [
     path('teacher/verify-password/', views.verify_teacher_password, name='verify_teacher_password'),
     path("teacher/answers/", views.teacher_answers, name="teacher_answers"),
     path("teacher/dashboard/", views.teacher_dashboard, name="teacher_dashboard"),
+    path("teacher/student/<str:username>/", views.teacher_student_detail, name="teacher_student_detail"),
 
     path('ask/', views.ask_question, name='ask_question'),
     

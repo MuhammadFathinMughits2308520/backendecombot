@@ -1436,7 +1436,7 @@ def teacher_answers(request):
             data.append({
                 "no": idx,
                 "nama_siswa": a.session.user.username if a.session and a.session.user else "-",
-                "kegiatan": a.step_id or a.activity_id or "-",  # Gunakan activity_id karena bukan ForeignKey
+                "kegiatan": a.activity_id or "-",  # Gunakan activity_id karena bukan ForeignKey
                 "jenis_pertanyaan": a.answer_type or "text",
                 "pertanyaan": a.question_text or "",
                 "jawaban_siswa": a.answer_text or "",
@@ -1525,6 +1525,438 @@ def teacher_dashboard(request):
         print(traceback.format_exc())
         return Response(
             {"error": str(e), "detail": "Internal server error"}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )# ===== PERBAIKAN UNTUK TEACHER FUNCTIONS =====
+
+from django.core.paginator import Paginator
+from django.db.models import Q, Count, Max
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework import status
+
+@api_view(["GET"])
+@permission_classes([AllowAny])  # Atau gunakan custom permission
+def teacher_answers(request):
+    """
+    GET /api/teacher/answers/
+    
+    Query params:
+    - q: search username/answer/question
+    - activity: filter by activity_id
+    - answer_type: filter by answer type
+    - date_from: filter by date (YYYY-MM-DD)
+    - date_to: filter by date (YYYY-MM-DD)
+    - ordering: created_at atau -created_at
+    - page: page number
+    - page_size: items per page
+    """
+    try:
+        # PERBAIKAN 1: Tambahkan filter untuk memastikan data valid
+        qs = UserAnswer.objects.select_related(
+            "session__user"
+        ).exclude(
+            session__isnull=True
+        ).exclude(
+            session__user__isnull=True
+        )
+
+        # Filter berdasarkan query params
+        q = request.GET.get("q", "").strip()
+        activity = request.GET.get("activity", "").strip()
+        answer_type = request.GET.get("answer_type", "").strip()
+        date_from = request.GET.get("date_from", "").strip()
+        date_to = request.GET.get("date_to", "").strip()
+        ordering = request.GET.get("ordering", "-created_at")
+
+        # Search filter
+        if q:
+            qs = qs.filter(
+                Q(session__user__username__icontains=q) |
+                Q(answer_text__icontains=q) |
+                Q(question_text__icontains=q)
+            )
+        
+        # Activity filter - PERBAIKAN 2: Handle NULL activity_id
+        if activity:
+            qs = qs.filter(activity_id__icontains=activity)
+        
+        # Answer type filter
+        if answer_type:
+            qs = qs.filter(answer_type=answer_type)
+        
+        # Date range filter
+        if date_from:
+            try:
+                qs = qs.filter(created_at__date__gte=date_from)
+            except Exception as e:
+                print(f"Invalid date_from format: {e}")
+        
+        if date_to:
+            try:
+                qs = qs.filter(created_at__date__lte=date_to)
+            except Exception as e:
+                print(f"Invalid date_to format: {e}")
+
+        # Ordering validation
+        allowed_orderings = ['created_at', '-created_at', 'updated_at', '-updated_at']
+        if ordering not in allowed_orderings:
+            ordering = '-created_at'
+        qs = qs.order_by(ordering)
+
+        # Pagination
+        page = int(request.GET.get("page", 1))
+        page_size = int(request.GET.get("page_size", 25))
+        
+        # Batasi page_size maksimal
+        page_size = min(page_size, 100)
+        
+        paginator = Paginator(qs, page_size)
+        
+        try:
+            page_obj = paginator.get_page(page)
+        except Exception as e:
+            return Response(
+                {"error": f"Pagination error: {str(e)}"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Build response data - PERBAIKAN 3: Handle missing data gracefully
+        data = []
+        start_no = (page_obj.number - 1) * page_size + 1
+        
+        for idx, answer in enumerate(page_obj.object_list, start=start_no):
+            # Safe data extraction
+            try:
+                username = answer.session.user.username if (answer.session and answer.session.user) else "Unknown"
+            except:
+                username = "Unknown"
+            
+            # PERBAIKAN 4: Gunakan step_id jika activity_id kosong
+            activity_name = answer.activity_id or answer.step_id or "-"
+            
+            # Format tanggal dengan fallback
+            try:
+                tanggal = answer.created_at.strftime("%Y-%m-%d %H:%M") if answer.created_at else "-"
+            except:
+                tanggal = "-"
+            
+            data.append({
+                "no": idx,
+                "id": answer.id,  # Tambahkan ID untuk referensi
+                "nama_siswa": username,
+                "kegiatan": activity_name,
+                "jenis_pertanyaan": answer.answer_type or "essay",
+                "pertanyaan": answer.question_text or "-",
+                "jawaban_siswa": answer.answer_text or "-",
+                "image_url": answer.image_url or None,  # Untuk jawaban yang ada gambar
+                "tipe_jawaban": answer.answer_type or "essay",
+                "status": "Submitted" if answer.is_submitted else "Draft",
+                "tanggal_dikirim": tanggal,
+            })
+
+        # Metadata
+        meta = {
+            "page": page_obj.number,
+            "page_size": page_size,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
+        }
+        
+        return Response({
+            "meta": meta, 
+            "results": data
+        }, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print("=" * 50)
+        print("ERROR in teacher_answers:")
+        print(str(e))
+        print(error_trace)
+        print("=" * 50)
+        
+        return Response(
+            {
+                "error": str(e), 
+                "detail": "Internal server error",
+                "trace": error_trace if request.GET.get('debug') else None
+            }, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def teacher_dashboard(request):
+    """
+    GET /api/teacher/dashboard/
+    
+    Query params:
+    - username: filter by username
+    - komik: filter by comic_slug
+    - status_komik: filter by finish status (selesai/belum)
+    - chat_status: filter by chat session status
+    - page: page number
+    - page_size: items per page
+    """
+    try:
+        # Get all users
+        users = User.objects.all().order_by('username')
+
+        # Filter by username
+        username_filter = request.GET.get("username", "").strip()
+        if username_filter:
+            users = users.filter(username__icontains=username_filter)
+
+        data_list = []
+        
+        for user in users:
+            try:
+                # PERBAIKAN 1: Dapatkan data comic progress (BUKAN activity progress)
+                comic_progress = UserComicProgress.objects.filter(
+                    user=user
+                ).order_by('-updated_at').first()
+                
+                # Dapatkan chat session
+                chat_session = ChatSession.objects.filter(
+                    user=user
+                ).order_by('-updated_at').first()
+                
+                # Dapatkan user progress (untuk tracking kegiatan chat)
+                user_progress = UserProgress.objects.filter(
+                    user=user
+                ).order_by('-updated_at').first()
+                
+                # Dapatkan activity progress terakhir
+                last_activity = ActivityProgress.objects.filter(
+                    session__user=user
+                ).order_by('-last_accessed').first()
+                
+                # Hitung total jawaban
+                total_answers = UserAnswer.objects.filter(
+                    session__user=user,
+                    is_submitted=True
+                ).count()
+                
+                # PERBAIKAN 2: Pisahkan data komik dan data kegiatan pembelajaran
+                
+                # Data Komik
+                if comic_progress:
+                    comic_name = f"{comic_progress.comic_slug} - {comic_progress.episode_slug}"
+                    last_page = comic_progress.last_page
+                    comic_status = "Selesai" if comic_progress.finish else "Belum Selesai"
+                else:
+                    comic_name = "-"
+                    last_page = 0
+                    comic_status = "Belum Mulai"
+                
+                # Data Chat/Kegiatan
+                if chat_session:
+                    chat_status_value = chat_session.status
+                    current_step = chat_session.current_step
+                else:
+                    chat_status_value = "not_started"
+                    current_step = "-"
+                
+                # Kegiatan terakhir
+                if last_activity:
+                    last_kegiatan = last_activity.activity_id
+                    kegiatan_status = last_activity.status
+                elif user_progress:
+                    last_kegiatan = user_progress.current_kegiatan
+                    kegiatan_status = "in_progress"
+                else:
+                    last_kegiatan = "-"
+                    kegiatan_status = "not_started"
+                
+                # PERBAIKAN 3: Struktur data yang lebih jelas
+                data_list.append({
+                    "siswa": user.username,
+                    "user_id": user.id,
+                    
+                    # Data Komik
+                    "komik": comic_name,
+                    "halaman_terakhir": last_page,
+                    "status_komik": comic_status,
+                    
+                    # Data Kegiatan Pembelajaran
+                    "chat_status": chat_status_value,
+                    "current_step": current_step,
+                    "kegiatan_terakhir": last_kegiatan,
+                    "status_kegiatan": kegiatan_status,
+                    
+                    # Statistik
+                    "jawaban_terkumpul": total_answers,
+                    
+                    # Timestamp
+                    "terakhir_aktif": (
+                        chat_session.updated_at.strftime("%Y-%m-%d %H:%M")
+                        if chat_session and chat_session.updated_at
+                        else "-"
+                    )
+                })
+                
+            except Exception as e:
+                print(f"Error processing user {user.username}: {str(e)}")
+                import traceback
+                print(traceback.format_exc())
+                continue
+
+        # PERBAIKAN 4: Filter setelah data terbentuk (lebih fleksibel)
+        komik_filter = request.GET.get("komik", "").strip()
+        status_komik_filter = request.GET.get("status_komik", "").strip()
+        chat_status_filter = request.GET.get("chat_status", "").strip()
+        
+        if komik_filter:
+            data_list = [
+                d for d in data_list 
+                if komik_filter.lower() in d['komik'].lower()
+            ]
+        
+        if status_komik_filter:
+            data_list = [
+                d for d in data_list 
+                if d['status_komik'].lower() == status_komik_filter.lower()
+            ]
+        
+        if chat_status_filter:
+            data_list = [
+                d for d in data_list 
+                if str(d['chat_status']).lower() == chat_status_filter.lower()
+            ]
+
+        # Pagination
+        page = int(request.GET.get("page", 1))
+        page_size = int(request.GET.get("page_size", 25))
+        page_size = min(page_size, 100)  # Max 100 items per page
+        
+        paginator = Paginator(data_list, page_size)
+        page_obj = paginator.get_page(page)
+
+        # Metadata
+        meta = {
+            "page": page_obj.number,
+            "page_size": page_size,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
+        }
+        
+        return Response({
+            "meta": meta, 
+            "results": list(page_obj)
+        }, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print("=" * 50)
+        print("ERROR in teacher_dashboard:")
+        print(str(e))
+        print(error_trace)
+        print("=" * 50)
+        
+        return Response(
+            {
+                "error": str(e), 
+                "detail": "Internal server error",
+                "trace": error_trace if request.GET.get('debug') else None
+            }, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def teacher_student_detail(request, username):
+    """
+    GET /api/teacher/student/<username>/
+    
+    Mendapatkan detail lengkap progress seorang siswa
+    """
+    try:
+        user = User.objects.get(username=username)
+        
+        # Comic Progress
+        comic_progress_list = UserComicProgress.objects.filter(
+            user=user
+        ).order_by('-updated_at')
+        
+        comics_data = [{
+            "comic_slug": cp.comic_slug,
+            "episode_slug": cp.episode_slug,
+            "last_page": cp.last_page,
+            "finish": cp.finish,
+            "updated_at": cp.updated_at.strftime("%Y-%m-%d %H:%M")
+        } for cp in comic_progress_list]
+        
+        # Chat Sessions
+        chat_sessions = ChatSession.objects.filter(
+            user=user
+        ).order_by('-updated_at')
+        
+        sessions_data = [{
+            "session_id": cs.session_id,
+            "current_step": cs.current_step,
+            "status": cs.status,
+            "created_at": cs.created_at.strftime("%Y-%m-%d %H:%M"),
+            "updated_at": cs.updated_at.strftime("%Y-%m-%d %H:%M")
+        } for cs in chat_sessions]
+        
+        # Activity Progress
+        activity_progress_list = ActivityProgress.objects.filter(
+            session__user=user
+        ).order_by('activity_id')
+        
+        activities_data = [{
+            "activity_id": ap.activity_id,
+            "status": ap.status,
+            "last_accessed": ap.last_accessed.strftime("%Y-%m-%d %H:%M"),
+            "completed_at": ap.completed_at.strftime("%Y-%m-%d %H:%M") if ap.completed_at else None
+        } for ap in activity_progress_list]
+        
+        # Answers
+        total_answers = UserAnswer.objects.filter(
+            session__user=user,
+            is_submitted=True
+        ).count()
+        
+        # Statistics
+        answers_by_activity = UserAnswer.objects.filter(
+            session__user=user,
+            is_submitted=True
+        ).values('activity_id').annotate(
+            count=Count('id')
+        ).order_by('activity_id')
+        
+        return Response({
+            "username": username,
+            "user_id": user.id,
+            "comics": comics_data,
+            "chat_sessions": sessions_data,
+            "activities": activities_data,
+            "statistics": {
+                "total_answers": total_answers,
+                "answers_by_activity": list(answers_by_activity)
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except User.DoesNotExist:
+        return Response(
+            {"error": "User tidak ditemukan"}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        import traceback
+        print(f"Error in teacher_student_detail: {str(e)}")
+        print(traceback.format_exc())
+        return Response(
+            {"error": str(e)}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
     
