@@ -26,7 +26,7 @@ class UserAnswerSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'session', 'question_id', 'storage_key', 
             'answer_text', 'answer_type', 'question_text', 
-            'step_id', 'activity_id', 'image_url',  # ⭐⭐ activity_id sebagai alias step_id ⭐⭐
+            'step_id', 'activity_id', 'image_url',
             'is_submitted', 'submitted_at', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
