@@ -1053,7 +1053,7 @@ def force_rag_reload(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def start_chat_session(request):
-    """Memulai sesi chat baru untuk kegiatan pembelajaran"""
+    """Memulai sesi chat baru untuk kegiatan pembelajaran - FIXED"""
     try:
         session_id = request.data.get('session_id', f"session_{timezone.now().strftime('%Y%m%d_%H%M%S')}")
         
@@ -1090,7 +1090,6 @@ def start_chat_session(request):
                 session=session,
                 current_kegiatan='intro',
                 total_answers=0,
-                completed_activities=['intro']
             )
         
         return Response({
@@ -1106,7 +1105,7 @@ def start_chat_session(request):
             'status': 'error',
             'message': 'Gagal memulai sesi chat'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+        
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def send_chat_message(request):
@@ -1253,84 +1252,213 @@ def get_session_overview(request, session_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def submit_activity_answer(request):
-    """Menyimpan jawaban user untuk activity tertentu"""
+    """Menyimpan jawaban user untuk activity tertentu - FIXED VERSION"""
     try:
+        print("=== DEBUG: submit_activity_answer CALLED ===")
+        print("Request data:", request.data)
+        print("User:", request.user.username)
+        
+        # Extract data dengan fallback yang lebih baik
         session_id = request.data.get('session_id')
-        activity_id = request.data.get('activity_id')
-        question_data = request.data.get('question_data')
+        step_id = request.data.get('step_id') or request.data.get('activity_id')
+        question_data = request.data.get('question_data', {})
         answer_text = request.data.get('answer_text', '')
         answer_type = request.data.get('answer_type', 'essay')
         
-        if not all([session_id, activity_id, question_data]):
+        # Debug detail
+        print(f"Session ID: {session_id}")
+        print(f"Step ID: {step_id}")
+        print(f"Question Data: {question_data}")
+        print(f"Answer Text length: {len(answer_text)}")
+        print(f"Answer Type: {answer_type}")
+        
+        # Validasi data yang lebih fleksibel
+        if not session_id:
+            logger.error("Missing session_id")
             return Response({
                 'status': 'error',
-                'message': 'Session ID, Activity ID, dan Question Data diperlukan'
+                'message': 'Session ID diperlukan'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not step_id:
+            logger.error("Missing step_id")
+            return Response({
+                'status': 'error',
+                'message': 'Step ID diperlukan'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Dapatkan session
         try:
             session = ChatSession.objects.get(session_id=session_id, user=request.user)
+            print(f"Session found: {session.session_id}")
         except ChatSession.DoesNotExist:
+            logger.error(f"Session not found: {session_id} for user {request.user.username}")
             return Response({
                 'status': 'error',
                 'message': 'Sesi tidak ditemukan'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Simpan jawaban
-        answer = UserAnswer.objects.create(
+        # Extract question data dengan fallback yang lebih robust
+        if isinstance(question_data, str):
+            try:
+                question_data = json.loads(question_data)
+            except:
+                question_data = {}
+        
+        question_id = question_data.get('id') or f"question_{int(timezone.now().timestamp())}"
+        storage_key = question_data.get('storage_key') or f"storage_{question_id}"
+        question_text = question_data.get('text') or question_data.get('question_text') or 'Pertanyaan tidak tersedia'
+        
+        print(f"Processed question data:")
+        print(f"  Question ID: {question_id}")
+        print(f"  Storage Key: {storage_key}")
+        print(f"  Question Text: {question_text[:100]}...")
+        
+        # Cek apakah jawaban sudah ada
+        existing_answer = UserAnswer.objects.filter(
             session=session,
-            question_id=question_data.get('id'),
-            storage_key=question_data.get('storage_key'),
-            answer_text=answer_text,
-            answer_type=answer_type,
-            question_text=question_data.get('text', ''),
-            step_id=activity_id,
-            is_submitted=True,
-            submitted_at=timezone.now()
-        )
+            question_id=question_id
+        ).first()
+        
+        if existing_answer:
+            # Update existing answer
+            print(f"Updating existing answer: {existing_answer.id}")
+            existing_answer.answer_text = answer_text
+            existing_answer.answer_type = answer_type
+            existing_answer.question_text = question_text
+            existing_answer.step_id = step_id
+            existing_answer.activity_id = step_id  # Untuk kompatibilitas
+            existing_answer.is_submitted = True
+            existing_answer.submitted_at = timezone.now()
+            existing_answer.save()
+            
+            answer = existing_answer
+            action = 'updated'
+        else:
+            # Buat jawaban baru
+            print("Creating new answer")
+            answer = UserAnswer.objects.create(
+                session=session,
+                question_id=question_id,
+                storage_key=storage_key,
+                answer_text=answer_text,
+                answer_type=answer_type,
+                question_text=question_text,
+                step_id=step_id,
+                activity_id=step_id,  # Untuk kompatibilitas
+                is_submitted=True,
+                submitted_at=timezone.now()
+            )
+            action = 'created'
+        
+        print(f"Answer {action} successfully: {answer.id}")
         
         # Update user progress
         user_progress, created = UserProgress.objects.get_or_create(
             user=request.user,
             session=session,
             defaults={
-                'current_kegiatan': activity_id,
+                'current_kegiatan': step_id,
                 'total_answers': 1,
-                'completed_activities': [activity_id]
             }
         )
         
         if not created:
-            user_progress.total_answers += 1
-            if activity_id not in user_progress.completed_activities:
-                user_progress.completed_activities.append(activity_id)
+            # Hitung total answers yang submitted
+            total_submitted = UserAnswer.objects.filter(
+                session=session, 
+                is_submitted=True
+            ).count()
+            
+            user_progress.total_answers = total_submitted
+            user_progress.current_kegiatan = step_id
             user_progress.save()
         
-        return Response({
+        print(f"User progress updated: {user_progress.total_answers} answers")
+        
+        # Update activity progress
+        activity_progress, created = ActivityProgress.objects.get_or_create(
+            session=session,
+            activity_id=step_id,
+            defaults={
+                'status': 'completed',
+                'completed_at': timezone.now()
+            }
+        )
+        
+        if not created:
+            activity_progress.status = 'completed'
+            activity_progress.completed_at = timezone.now()
+            activity_progress.save()
+        
+        print(f"Activity progress updated: {step_id}")
+        
+        # Serialize response
+        answer_data = {
+            'id': answer.id,
+            'question_id': answer.question_id,
+            'answer_text': answer.answer_text,
+            'answer_type': answer.answer_type,
+            'question_text': answer.question_text,
+            'step_id': answer.step_id,
+            'activity_id': answer.activity_id,
+            'is_submitted': answer.is_submitted,
+            'submitted_at': answer.submitted_at.isoformat() if answer.submitted_at else None,
+            'created_at': answer.created_at.isoformat(),
+        }
+        
+        # Hitung completed activities
+        completed_activities_count = ActivityProgress.objects.filter(
+            session=session,
+            status='completed'
+        ).count()
+        
+        response_data = {
             'status': 'success',
             'message': 'Jawaban berhasil disimpan',
-            'answer_id': answer.id
-        })
+            'action': action,
+            'answer_id': answer.id,
+            'answer': answer_data,
+            'progress': {
+                'total_answers': user_progress.total_answers,
+                'current_step': user_progress.current_kegiatan,
+                'completed_activities_count': completed_activities_count
+            }
+        }
+        
+        print("=== DEBUG: Response data ===")
+        print(response_data)
+        
+        return Response(response_data)
         
     except Exception as e:
-        logger.error(f"Error submitting activity answer: {e}")
+        logger.error(f"Error submitting activity answer: {str(e)}", exc_info=True)
+        import traceback
+        error_trace = traceback.format_exc()
+        print("FULL ERROR TRACEBACK:")
+        print(error_trace)
+        
         return Response({
             'status': 'error',
-            'message': 'Gagal menyimpan jawaban'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+            'message': f'Gagal menyimpan jawaban: {str(e)}',
+            'debug_info': {
+                'error_type': type(e).__name__,
+                'user': request.user.username if request.user else 'Anonymous'
+            }
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)               
+        
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def complete_activity(request):
-    """Menandai activity sebagai selesai"""
+    """Menandai activity sebagai selesai - FIXED"""
     try:
         session_id = request.data.get('session_id')
-        activity_id = request.data.get('activity_id')
+        step_id = request.data.get('step_id')  # ⭐⭐ GUNAKAN step_id ⭐⭐
         
-        if not session_id or not activity_id:
+        if not session_id or not step_id:
             return Response({
                 'status': 'error',
-                'message': 'Session ID dan Activity ID diperlukan'
+                'message': 'Session ID dan Step ID diperlukan'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Dapatkan session
@@ -1345,23 +1473,21 @@ def complete_activity(request):
         # Tandai activity sebagai selesai
         activity_progress, created = ActivityProgress.objects.get_or_create(
             session=session,
-            activity_id=activity_id,
+            activity_id=step_id,  # ⭐⭐ GUNAKAN step_id ⭐⭐
             defaults={
                 'status': 'completed',
-                'answers_submitted': True,
                 'completed_at': timezone.now()
             }
         )
         
         if not created:
             activity_progress.status = 'completed'
-            activity_progress.answers_submitted = True
             activity_progress.completed_at = timezone.now()
             activity_progress.save()
         
         return Response({
             'status': 'success',
-            'message': f'Activity {activity_id} berhasil diselesaikan'
+            'message': f'Step {step_id} berhasil diselesaikan'
         })
         
     except Exception as e:
@@ -1369,8 +1495,7 @@ def complete_activity(request):
         return Response({
             'status': 'error',
             'message': 'Gagal menandai activity sebagai selesai'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)        
 
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from django.db.models import Q
@@ -1384,42 +1509,66 @@ def _int_or_default(value, default):
 
 
 @api_view(["GET"])
+@permission_classes([AllowAny])
 def teacher_answers(request):
+    """
+    GET /api/teacher/answers/
+    """
     try:
-        # Hapus select_related yang salah
-        qs = UserAnswer.objects.select_related("session__user").all()
+        # PERBAIKAN: Gunakan step_id sebagai activity_id
+        qs = UserAnswer.objects.select_related("session__user").exclude(
+            session__isnull=True
+        ).exclude(
+            session__user__isnull=True
+        )
 
-        q = request.GET.get("q")
-        activity = request.GET.get("activity")
-        answer_type = request.GET.get("answer_type")
-        date_from = request.GET.get("date_from")
-        date_to = request.GET.get("date_to")
+        q = request.GET.get("q", "").strip()
+        activity = request.GET.get("activity", "").strip()  # Ini mencari di step_id
+        answer_type = request.GET.get("answer_type", "").strip()
+        date_from = request.GET.get("date_from", "").strip()
+        date_to = request.GET.get("date_to", "").strip()
         ordering = request.GET.get("ordering", "-created_at")
 
+        # Search filter
         if q:
             qs = qs.filter(
                 Q(session__user__username__icontains=q) |
                 Q(answer_text__icontains=q) |
                 Q(question_text__icontains=q)
             )
+        
+        # Activity filter - CARI DI step_id (karena activity_id disimpan sebagai step_id)
         if activity:
-            qs = qs.filter(activity_id__icontains=activity)
+            qs = qs.filter(step_id__icontains=activity)
+        
+        # Answer type filter
         if answer_type:
             qs = qs.filter(answer_type=answer_type)
+        
+        # Date range filter
         if date_from:
-            qs = qs.filter(created_at__date__gte=date_from)
+            try:
+                qs = qs.filter(created_at__date__gte=date_from)
+            except Exception as e:
+                print(f"Invalid date_from format: {e}")
+        
         if date_to:
-            qs = qs.filter(created_at__date__lte=date_to)
+            try:
+                qs = qs.filter(created_at__date__lte=date_to)
+            except Exception as e:
+                print(f"Invalid date_to format: {e}")
 
-        # ordering validation
-        if ordering in ['created_at', '-created_at']:
-            qs = qs.order_by(ordering)
-        else:
-            qs = qs.order_by("-created_at")
+        # Ordering validation
+        allowed_orderings = ['created_at', '-created_at', 'updated_at', '-updated_at']
+        if ordering not in allowed_orderings:
+            ordering = '-created_at'
+        qs = qs.order_by(ordering)
 
-        # pagination
+        # Pagination
         page = int(request.GET.get("page", 1))
         page_size = int(request.GET.get("page_size", 25))
+        page_size = min(page_size, 100)
+        
         paginator = Paginator(qs, page_size)
         
         try:
@@ -1430,34 +1579,65 @@ def teacher_answers(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Build response data
         data = []
         start_no = (page_obj.number - 1) * page_size + 1
-        for idx, a in enumerate(page_obj.object_list, start=start_no):
+        
+        for idx, answer in enumerate(page_obj.object_list, start=start_no):
+            try:
+                username = answer.session.user.username if (answer.session and answer.session.user) else "Unknown"
+            except:
+                username = "Unknown"
+            
+            # ⭐⭐ GUNAKAN step_id SEBAGAI activity_id ⭐⭐
+            activity_name = answer.step_id or "-"
+            
+            try:
+                tanggal = answer.created_at.strftime("%Y-%m-%d %H:%M") if answer.created_at else "-"
+            except:
+                tanggal = "-"
+            
             data.append({
                 "no": idx,
-                "nama_siswa": a.session.user.username if a.session and a.session.user else "-",
-                "kegiatan": a.activity_id or "-",  # Gunakan activity_id karena bukan ForeignKey
-                "jenis_pertanyaan": a.answer_type or "text",
-                "pertanyaan": a.question_text or "",
-                "jawaban_siswa": a.answer_text or "",
-                "tipe_jawaban": a.answer_type or "",
-                "tanggal_dikirim": a.created_at.strftime("%Y-%m-%d %H:%M") if a.created_at else "",
+                "id": answer.id,
+                "nama_siswa": username,
+                "kegiatan": activity_name,  # ⭐⭐ step_id sebagai kegiatan ⭐⭐
+                "jenis_pertanyaan": answer.answer_type or "essay",
+                "pertanyaan": answer.question_text or "-",
+                "jawaban_siswa": answer.answer_text or "-",
+                "image_url": answer.image_url or None,
+                "tipe_jawaban": answer.answer_type or "essay",
+                "status": "Submitted" if answer.is_submitted else "Draft",
+                "tanggal_dikirim": tanggal,
             })
 
+        # Metadata
         meta = {
             "page": page_obj.number,
             "page_size": page_size,
             "total_pages": paginator.num_pages,
             "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
         }
-        return Response({"meta": meta, "results": data}, status=status.HTTP_200_OK)
+        
+        return Response({
+            "meta": meta, 
+            "results": data
+        }, status=status.HTTP_200_OK)
     
     except Exception as e:
         import traceback
-        print("ERROR in teacher_answers:", str(e))
-        print(traceback.format_exc())
+        error_trace = traceback.format_exc()
+        print("ERROR in teacher_answers:")
+        print(str(e))
+        print(error_trace)
+        
         return Response(
-            {"error": str(e), "detail": "Internal server error"}, 
+            {
+                "error": str(e), 
+                "detail": "Internal server error",
+            }, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -1693,15 +1873,7 @@ def teacher_answers(request):
 @permission_classes([AllowAny])
 def teacher_dashboard(request):
     """
-    GET /api/teacher/dashboard/
-    
-    Query params:
-    - username: filter by username
-    - komik: filter by comic_slug
-    - status_komik: filter by finish status (selesai/belum)
-    - chat_status: filter by chat session status
-    - page: page number
-    - page_size: items per page
+    GET /api/teacher/dashboard/ - FIXED VERSION
     """
     try:
         # Get all users
@@ -1716,7 +1888,7 @@ def teacher_dashboard(request):
         
         for user in users:
             try:
-                # PERBAIKAN 1: Dapatkan data comic progress (BUKAN activity progress)
+                # Dapatkan data comic progress
                 comic_progress = UserComicProgress.objects.filter(
                     user=user
                 ).order_by('-updated_at').first()
@@ -1726,7 +1898,7 @@ def teacher_dashboard(request):
                     user=user
                 ).order_by('-updated_at').first()
                 
-                # Dapatkan user progress (untuk tracking kegiatan chat)
+                # Dapatkan user progress
                 user_progress = UserProgress.objects.filter(
                     user=user
                 ).order_by('-updated_at').first()
@@ -1741,8 +1913,6 @@ def teacher_dashboard(request):
                     session__user=user,
                     is_submitted=True
                 ).count()
-                
-                # PERBAIKAN 2: Pisahkan data komik dan data kegiatan pembelajaran
                 
                 # Data Komik
                 if comic_progress:
@@ -1773,7 +1943,7 @@ def teacher_dashboard(request):
                     last_kegiatan = "-"
                     kegiatan_status = "not_started"
                 
-                # PERBAIKAN 3: Struktur data yang lebih jelas
+                # PERBAIKAN: Hapus completed_activities dari response
                 data_list.append({
                     "siswa": user.username,
                     "user_id": user.id,
@@ -1802,11 +1972,9 @@ def teacher_dashboard(request):
                 
             except Exception as e:
                 print(f"Error processing user {user.username}: {str(e)}")
-                import traceback
-                print(traceback.format_exc())
                 continue
 
-        # PERBAIKAN 4: Filter setelah data terbentuk (lebih fleksibel)
+        # Filter setelah data terbentuk
         komik_filter = request.GET.get("komik", "").strip()
         status_komik_filter = request.GET.get("status_komik", "").strip()
         chat_status_filter = request.GET.get("chat_status", "").strip()
@@ -1832,7 +2000,7 @@ def teacher_dashboard(request):
         # Pagination
         page = int(request.GET.get("page", 1))
         page_size = int(request.GET.get("page_size", 25))
-        page_size = min(page_size, 100)  # Max 100 items per page
+        page_size = min(page_size, 100)
         
         paginator = Paginator(data_list, page_size)
         page_obj = paginator.get_page(page)
@@ -1855,21 +2023,17 @@ def teacher_dashboard(request):
     except Exception as e:
         import traceback
         error_trace = traceback.format_exc()
-        print("=" * 50)
         print("ERROR in teacher_dashboard:")
         print(str(e))
-        print(error_trace)
-        print("=" * 50)
         
         return Response(
             {
                 "error": str(e), 
                 "detail": "Internal server error",
-                "trace": error_trace if request.GET.get('debug') else None
             }, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
+        
 
 @api_view(["GET"])
 @permission_classes([AllowAny])

@@ -18,10 +18,19 @@ class ChatMessageSerializer(serializers.ModelSerializer):
         fields = ['id', 'session', 'message_type', 'character', 'message_text', 'step_id', 'timestamp']
 
 class UserAnswerSerializer(serializers.ModelSerializer):
+    # Tambahkan field virtual untuk kompatibilitas
+    activity_id = serializers.CharField(source='step_id', read_only=True)
+    
     class Meta:
         model = UserAnswer
-        fields = ['id', 'session', 'question_id', 'storage_key', 'answer_text', 'answer_type', 'question_text', 'step_id', 'image_url', 'is_submitted', 'submitted_at', 'created_at', 'updated_at']
-
+        fields = [
+            'id', 'session', 'question_id', 'storage_key', 
+            'answer_text', 'answer_type', 'question_text', 
+            'step_id', 'activity_id', 'image_url',  # ⭐⭐ activity_id sebagai alias step_id ⭐⭐
+            'is_submitted', 'submitted_at', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+        
 class UserProgressSerializer(serializers.ModelSerializer):
     completion_percentage = serializers.SerializerMethodField()
     
