@@ -62,7 +62,7 @@ else:
     all_env_vars = {k: v for k, v in os.environ.items() if 'API' in k or 'KEY' in k}
     print(f"=== DEBUG: Available API/KEY env vars: {all_env_vars} ===")
 
-MODEL = "gemini-2.0-flash-exp"  
+MODEL = "gemini-2.0-flash-lite"  
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 TOP_K = 4
