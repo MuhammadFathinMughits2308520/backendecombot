@@ -45,16 +45,6 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
 }
 
-# Methods yang diizinkan
-CORS_ALLOW_METHODS = [
-    'DELETE',
-    'GET',
-    'OPTIONS', 
-    'PATCH',
-    'POST',
-    'PUT',
-]
-
 # ----------------------------------------------------
 # ⚙️ Middleware
 # ----------------------------------------------------
@@ -121,8 +111,9 @@ SIMPLE_JWT = {
 # ----------------------------------------------------
 # 🌐 CORS (untuk frontend React)
 # ----------------------------------------------------
-CORS_ALLOW_ALL_ORIGINS = False  # Untuk security yang lebih baik
-CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_ALL_ORIGINS = True
+from corsheaders.defaults import default_headers
+CORS_ALLOW_HEADERS = list(default_headers) + ["Authorization"]
 
 # ----------------------------------------------------
 # 🌍 Internasionalisasi
