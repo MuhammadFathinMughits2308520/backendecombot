@@ -49,16 +49,16 @@ xarray==2024.10.0
 whitenoise==6.6.0
 mysqlclient==2.2.6
 
-# AI/ML Packages - Versi yang kompatibel
-google-generativeai==0.8.5
-langchain==1.0.2
-langchain-community==0.4.1
-langchain-core==1.0.1
-langchain-google-genai==2.0.10
-langgraph==1.0.1
-chromadb==1.2.2
-sentence-transformers==5.1.2
-transformers==4.57.1
-torch==2.9.0 --extra-index-url https://download.pytorch.org/whl/cpu
+# AI/ML Packages - VERSI 0.x YANG STABIL & KOMPATIBEL
+google-generativeai==0.3.2
+langchain==0.1.14
+langchain-community==0.0.38
+langchain-core==0.1.61
+langchain-google-genai==0.1.3
+langgraph==0.0.59
+chromadb==0.4.24
+sentence-transformers==2.7.0
+transformers==4.41.2
+torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 
 python-dotenv
