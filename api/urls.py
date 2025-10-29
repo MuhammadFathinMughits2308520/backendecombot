@@ -19,7 +19,7 @@ urlpatterns = [
     path("teacher/dashboard/", views.teacher_dashboard, name="teacher_dashboard"),
     path("teacher/student/<str:username>/", views.teacher_student_detail, name="teacher_student_detail"),
 
-    # path('ask/', views.ask_question, name='ask_question'),
+    path('ask/', views.ask_question, name='ask_question'),
     
     # Chat Session Management
     path('chat/session/start/', views.start_chat_session, name='start_chat_session'),
@@ -36,8 +36,6 @@ urlpatterns = [
     # Health check
     path('health/', views.health_check, name='health_check'),
     
-     path('ask/', views.ask_question, name='ask_question'),
-     
     # RAG System Debug
     path('debug-rag-status/', views.debug_rag_status, name='debug_rag_status'),
     path('reload-rag/', views.reload_rag_system, name='reload_rag_system'),

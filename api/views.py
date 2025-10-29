@@ -15,11 +15,10 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.utils import timezone
 
-# ===== IMPORT UNTUK CHATBOT DENGAN LANGGRAPH =====
+# Import untuk chatbot
 import sys
 import os
 import pandas as pd
-import json
 import google.generativeai as genai
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -28,42 +27,50 @@ from langchain_core.documents import Document
 from dotenv import load_dotenv
 import logging
 
-# ===== LANGGRAPH & LANGCHAIN IMPORTS =====
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import START, MessagesState, StateGraph
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_core.messages import trim_messages
-from typing import Sequence, Annotated, TypedDict
-from langchain_core.messages import BaseMessage
-from langgraph.graph.message import add_messages
-
 # Setup logging
 logger = logging.getLogger(__name__)
 
-# Load environment variables
+# Load environment variables - PERBAIKAN: Load dari root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 env_path = os.path.join(BASE_DIR, '.env')
 load_dotenv(env_path)
 
-# Configuration untuk chatbot
+# Configuration untuk chatbot - PATH DIPERBAIKI
 CSV_PATH = os.path.join(BASE_DIR, "data/data.csv")
 PERSIST_DIR = os.path.join(BASE_DIR, "chroma_db")
 
-# Load API key
+# PERBAIKAN: Debug environment variables
+print(f"=== DEBUG: Current directory: {os.getcwd()} ===")
+print(f"=== DEBUG: BASE_DIR: {BASE_DIR} ===")
+print(f"=== DEBUG: CSV_PATH: {CSV_PATH} ===")
+print(f"=== DEBUG: PERSIST_DIR: {PERSIST_DIR} ===")
+print(f"=== DEBUG: .env path: {env_path} ===")
+print(f"=== DEBUG: .env exists: {os.path.exists(env_path)} ===")
+
+# Load API key dengan multiple fallbacks
 API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-MODEL_NAME = "gemini-2.0-flash-lite"  
+
+# Debugging detail untuk API key
+print(f"=== DEBUG: GEMINI_API_KEY loaded: {'YES' if API_KEY else 'NO'} ===")
+if API_KEY:
+    print(f"=== DEBUG: API Key length: {len(API_KEY)} ===")
+    print(f"=== DEBUG: API Key starts with: {API_KEY[:10]}... ===")
+    print(f"=== DEBUG: API Key ends with: ...{API_KEY[-4:]} ===")
+else:
+    print("=== DEBUG: API Key is EMPTY ===")
+    # Tampilkan semua environment variables yang tersedia
+    all_env_vars = {k: v for k, v in os.environ.items() if 'API' in k or 'KEY' in k}
+    print(f"=== DEBUG: Available API/KEY env vars: {all_env_vars} ===")
+
+MODEL = "gemini-2.0-flash-lite"  
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 TOP_K = 4
 
-# Global variables
+# Global variable for retriever
 retriever = None
-gemini_model = None
-chatbot_app = None
 
-# ===== CHATBOT FLOW CONFIGURATION =====
+# Data struktur chatbot dari file JSON Anda
 CHATBOT_FLOW = {
     "intro": {
         "id": "intro",
@@ -249,323 +256,226 @@ CHATBOT_FLOW = {
     }
 }
 
-# ===== INISIALISASI MODEL GEMINI =====
+# Navigation rules berdasarkan file JSON Anda
+NAVIGATION_RULES = {
+    "intro": {
+        "siap": "kimia_hijau"
+    },
+    "kimia_hijau": {
+        "sudah": "pre_kegiatan",
+        "forum diskusi": "forum_diskusi"
+    },
+    "pre_kegiatan": {
+        "mulai kegiatan 1": "kegiatan_1",
+        "kembali ke kimia hijau": "kimia_hijau",
+        "forum diskusi": "forum_diskusi"
+    },
+    "kegiatan_1": {
+        "pertanyaan": "kegiatan_1_question",
+        "mulai kegiatan 2": "kegiatan_2",
+        "kembali ke kegiatan 1": "kegiatan_1",
+        "forum diskusi": "forum_diskusi"
+    },
+    "kegiatan_2": {
+        "pertanyaan": "kegiatan_2_question",
+        "mulai kegiatan 3": "kegiatan_3",
+        "kembali ke kegiatan 2": "kegiatan_2",
+        "forum diskusi": "forum_diskusi"
+    },
+    "kegiatan_3": {
+        "pertanyaan": "kegiatan_3_question",
+        "mulai kegiatan 4": "kegiatan_4",
+        "kembali ke kegiatan 3": "kegiatan_3",
+        "forum diskusi": "forum_diskusi"
+    },
+    "kegiatan_4": {
+        "pertanyaan diskusi": "kegiatan_4_discussion",
+        "mulai kegiatan 5": "kegiatan_5",
+        "kembali ke kegiatan 4": "kegiatan_4",
+        "forum diskusi": "forum_diskusi"
+    },
+    "kegiatan_5": {
+        "pertanyaan tantangan": "kegiatan_5_challenge",
+        "mulai kegiatan 6": "kegiatan_6",
+        "kembali ke kegiatan 5": "kegiatan_5",
+        "forum diskusi": "forum_diskusi"
+    },
+    "kegiatan_6": {
+        "pertanyaan kreasi": "kegiatan_6_creative",
+        "mulai kegiatan 7": "kegiatan_7",
+        "kembali ke kegiatan 6": "kegiatan_6",
+        "forum diskusi": "forum_diskusi"
+    },
+    "kegiatan_7": {
+        "pertanyaan reflektif": "kegiatan_7_reflective",
+        "kembali ke kegiatan 6": "kegiatan_6",
+        "forum diskusi": "forum_diskusi",
+        "selesai": "completion"
+    },
+    "completion": {
+        "forum diskusi": "forum_diskusi",
+        "kembali ke menu": "intro"
+    },
+    "forum_diskusi": {
+        "kembali ke kimia hijau": "kimia_hijau",
+        "kembali ke kegiatan 1": "kegiatan_1",
+        "kembali ke kegiatan 2": "kegiatan_2",
+        "kembali ke kegiatan 3": "kegiatan_3",
+        "kembali ke kegiatan 4": "kegiatan_4",
+        "kembali ke kegiatan 5": "kegiatan_5",
+        "kembali ke kegiatan 6": "kegiatan_6",
+        "kembali ke kegiatan 7": "kegiatan_7",
+        "kembali ke kegiatan akhir": "completion"
+    }
+}
 
-def initialize_gemini_model():
-    """Initialize Gemini model dengan error handling yang lebih baik"""
-    try:
-        if not API_KEY:
-            logger.error("❌ API key tidak ditemukan di environment variables")
-            logger.info("Pastikan GEMINI_API_KEY atau GOOGLE_API_KEY sudah di-set di .env file")
-            return None
-            
-        # Gunakan LangChain ChatGoogleGenerativeAI tanpa setting verbose global
-        model = ChatGoogleGenerativeAI(
-            model=MODEL_NAME,
-            google_api_key=API_KEY,
-            temperature=0.7,
-            max_tokens=1000,
-            timeout=30
-        )
-        
-        # Test the model dengan prompt sederhana
-        try:
-            test_response = model.invoke("Hello, test connection")
-            if test_response and hasattr(test_response, 'content'):
-                logger.info("✅ Gemini model initialized dan tested successfully")
-                return model
-            else:
-                logger.error("❌ Gemini model test failed - no response content")
-                return None
-        except Exception as test_error:
-            logger.error(f"❌ Gemini model test failed: {test_error}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"❌ Error initializing Gemini model: {e}")
-        return None    
-        
-# ===== LANGGRAPH CHATBOT SYSTEM =====
-
-class ChatState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
-    session_id: str
-    user_id: str
-    current_activity: str
-
-def create_chatbot_graph():
-    """Membuat LangGraph chatbot dengan memory persistence"""
-    try:
-        # Define the graph
-        workflow = StateGraph(state_schema=ChatState)
-        
-        # Define prompt template dengan konteks pembelajaran
-        prompt_template = ChatPromptTemplate.from_messages([
-            (
-                "system",
-                """Anda adalah Aquano, asisten virtual pembelajaran untuk Ecombot. Anda memiliki pengetahuan tentang:
-                
-                TOPIK UTAMA:
-                1. Kimia Hijau (Green Chemistry) dan 12 prinsipnya
-                2. Tradisi Mapag Hujan di Jawa Barat (Bandung dan Subang)
-                3. Filosofi Sunda seperti Seba Tangkal Muru Cai
-                4. Program Maraton Bebersih Walungan dan Susukan
-                5. Konservasi lingkungan dan mitigasi banjir
-                6. Pendidikan STEM (Science, Technology, Engineering, Arts, Mathematics)
-                
-                INSTRUKSI:
-                - Jawablah dengan bahasa Indonesia yang jelas dan mudah dipahami
-                - Bersikaplah ramah dan membantu seperti guru yang baik
-                - Jika informasi tidak cukup, gunakan pengetahuan umum Anda
-                - Fokus pada topik-topik utama di atas
-                - Bimbing siswa melalui proses pembelajaran yang interaktif
-                - Gunakan emoji sesekali untuk membuat percakapan lebih hidup
-                """
-            ),
-            MessagesPlaceholder(variable_name="messages"),
-        ])
-        
-        # Define the function that calls the model dengan RAG integration
-        def call_model_with_rag(state: ChatState):
-            """Memanggil model dengan konteks dari RAG system"""
-            try:
-                # Dapatkan pertanyaan terakhir dari user
-                last_user_message = None
-                for msg in reversed(state["messages"]):
-                    if isinstance(msg, HumanMessage):
-                        last_user_message = msg.content
-                        break
-                
-                # Jika ada RAG system, dapatkan konteks relevan
-                context = ""
-                if retriever and last_user_message:
-                    try:
-                        docs = retriever.get_relevant_documents(last_user_message)
-                        context = "\n\n".join([d.page_content for d in docs[:2]])  # Ambil 2 dokumen teratas
-                        logger.info(f"RAG retrieved {len(docs)} documents for question")
-                    except Exception as e:
-                        logger.error(f"Error retrieving RAG documents: {e}")
-                        context = "Informasi dari database sedang tidak tersedia."
-                
-                # Siapkan prompt dengan konteks
-                if context:
-                    enhanced_prompt = f"""
-KONTEKS TAMBAHAN:
-{context}
-
-PERTANYAAN USER:
-{last_user_message}
-
-JAWABAN (gunakan bahasa Indonesia yang jelas dan membantu):
-"""
-                    # Buat messages baru dengan konteks
-                    enhanced_messages = []
-                    for msg in state["messages"]:
-                        if isinstance(msg, HumanMessage) and msg.content == last_user_message:
-                            # Ganti pesan user dengan yang sudah diperkaya konteks
-                            enhanced_messages.append(HumanMessage(content=enhanced_prompt))
-                        else:
-                            enhanced_messages.append(msg)
-                    
-                    prompt = prompt_template.invoke({"messages": enhanced_messages})
-                else:
-                    prompt = prompt_template.invoke(state)
-                
-                # Panggil model
-                response = gemini_model.invoke(prompt)
-                
-                # Simpan interaksi ke database untuk analytics
-                try:
-                    session = ChatSession.objects.get(session_id=state["session_id"])
-                    ChatMessage.objects.create(
-                        session=session,
-                        message_type='bot',
-                        character='Aquano',
-                        message_text=response.content,
-                        step_id=state.get("current_activity", "general"),
-                        activity_id=state.get("current_activity", "general")
-                    )
-                except Exception as db_error:
-                    logger.error(f"Error saving chat message to DB: {db_error}")
-                
-                return {"messages": [response]}
-                
-            except Exception as e:
-                logger.error(f"Error in call_model_with_rag: {e}")
-                # Fallback response
-                fallback_response = AIMessage(
-                    content="Maaf, saya mengalami gangguan teknis. Silakan coba lagi atau hubungi administrator."
-                )
-                return {"messages": [fallback_response]}
-        
-        # Add nodes and edges
-        workflow.add_node("model", call_model_with_rag)
-        workflow.add_edge(START, "model")
-        
-        # Add memory persistence
-        memory = MemorySaver()
-        app = workflow.compile(checkpointer=memory)
-        
-        logger.info("✅ LangGraph chatbot system initialized successfully")
-        return app
-        
-    except Exception as e:
-        logger.error(f"Error creating LangGraph chatbot: {e}")
-        return None
-
-# ===== RAG SYSTEM =====
+# ===== FUNGSI RAG SYSTEM YANG DIPERBAIKI =====
 
 def create_fallback_retriever():
-    """Create a fallback retriever tanpa sentence-transformers"""
+    """Create a fallback retriever with basic knowledge"""
     try:
-        logger.info("Creating simple fallback retriever...")
-        
-        # Gunakan documents sederhana tanpa embeddings complex
+        logger.info("Creating fallback retriever...")
         fallback_docs = [
             Document(
                 page_content="""
-                Kimia Hijau (Green Chemistry) adalah pendekatan dalam ilmu kimia yang bertujuan merancang produk dan proses kimia yang mengurangi atau menghilangkan penggunaan dan pembentukan zat berbahaya. Ada 12 prinsip kimia hijau yang meliputi pencegahan limbah, atom economy, desain bahan kimia yang lebih aman, dan penggunaan energi yang efisien.
+                Topik: Kimia Hijau (Green Chemistry)
+                Pertanyaan: Apa itu Kimia Hijau?
+                Jawaban: Kimia Hijau adalah pendekatan dalam ilmu kimia yang bertujuan merancang produk dan proses kimia yang mengurangi atau menghilangkan penggunaan dan pembentukan zat berbahaya. Ada 12 prinsip kimia hijau yang meliputi pencegahan limbah, atom economy, desain bahan kimia yang lebih aman, dan penggunaan energi yang efisien.
+                Context: Pendidikan kimia berkelanjutan
+                Keywords: kimia hijau, green chemistry, lingkungan, berkelanjutan
+                Related topics: prinsip kimia hijau, lingkungan berkelanjutan
                 """,
                 metadata={"topic": "Kimia Hijau", "category": "education"}
             ),
             Document(
                 page_content="""
-                Tradisi Mapag Hujan adalah tradisi masyarakat Jawa Barat khususnya di Bandung dan Subang yang bertujuan menyambut musim hujan dengan membersihkan lingkungan, sungai, dan saluran air. Tradisi ini merupakan bentuk kearifan lokal dalam mitigasi banjir dan pelestarian lingkungan.
+                Topik: Tradisi Mapag Hujan
+                Pertanyaan: Apa itu tradisi Mapag Hujan?
+                Jawaban: Mapag Hujan adalah tradisi masyarakat Jawa Barat khususnya di Bandung dan Subang yang bertujuan menyambut musim hujan dengan membersihkan lingkungan, sungai, dan saluran air. Tradisi ini merupakan bentuk kearifan lokal dalam mitigasi banjir dan pelestarian lingkungan.
+                Context: Kearifan lokal dan lingkungan
+                Keywords: mapag hujan, tradisi, jawa barat, lingkungan, banjir
+                Related topics: budaya lokal, konservasi air, mitigasi banjir
                 """,
                 metadata={"topic": "Mapag Hujan", "category": "culture"}
+            ),
+            Document(
+                page_content="""
+                Topik: Prinsip Kimia Hijau
+                Pertanyaan: Apa saja prinsip-prinsip kimia hijau?
+                Jawaban: 12 Prinsip Kimia Hijau meliputi: 1. Pencegahan limbah, 2. Atom economy, 3. Sintesis bahan kimia yang kurang berbahaya, 4. Desain bahan kimia yang lebih aman, 5. Pelarut dan bahan pembantu yang lebih aman, 6. Efisiensi energi, 7. Penggunaan bahan baku terbarukan, 8. Mengurangi turunan, 9. Katalisis, 10. Desain untuk degradasi, 11. Analisis real-time untuk pencegahan polusi, 12. Kimia yang secara inherent lebih aman untuk pencegahan kecelakaan.
+                Context: Pendidikan kimia
+                Keywords: prinsip kimia hijau, 12 prinsip, green chemistry principles
+                Related topics: kimia berkelanjutan, pendidikan lingkungan
+                """,
+                metadata={"topic": "Prinsip Kimia Hijau", "category": "education"}
+            ),
+            Document(
+                page_content="""
+                Topik: Mitigasi Banjir
+                Pertanyaan: Bagaimana cara mitigasi banjir?
+                Jawaban: Mitigasi banjir dapat dilakukan melalui: membersihkan sungai dan saluran air, membuat biopori untuk meningkatkan resapan air, menanam pohon, tidak membuang sampah sembarangan, dan partisipasi masyarakat dalam menjaga lingkungan.
+                Context: Konservasi lingkungan
+                Keywords: mitigasi banjir, biopori, konservasi air, lingkungan
+                Related topics: pencegahan banjir, pelestarian lingkungan
+                """,
+                metadata={"topic": "Mitigasi Banjir", "category": "environment"}
             )
         ]
         
-        # Untuk fallback, kita buat simple retriever tanpa embeddings
-        class SimpleFallbackRetriever:
-            def __init__(self, docs):
-                self.docs = docs
-            
-            def get_relevant_documents(self, query):
-                # Return semua dokumen untuk semua query (sangat sederhana)
-                return self.docs
-            
-            async def aget_relevant_documents(self, query):
-                return self.docs
-        
-        retriever = SimpleFallbackRetriever(fallback_docs)
-        logger.info("[+] Simple fallback retriever created successfully")
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        vectorstore = Chroma.from_documents(fallback_docs, embeddings)
+        retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
+        logger.info("[+] Fallback retriever created successfully")
         return retriever
-        
     except Exception as e:
-        logger.error(f"Error creating simple fallback retriever: {e}")
+        logger.error(f"Error creating fallback retriever: {e}")
         return None
-    
-def create_simple_csv_retriever():
-    """Create a simple retriever that searches directly in CSV"""
-    try:
-        logger.info("Creating simple CSV retriever...")
-        
-        # Load CSV data directly
-        df = pd.read_csv(CSV_PATH, dtype=str).fillna("")
-        logger.info(f"Loaded CSV with {len(df)} rows")
-        
-        # Prepare documents
-        documents = []
-        for _, row in df.iterrows():
-            # Create rich content for better retrieval
-            content = f"""
-Topic: {row.get('topic', '')}
-Question: {row.get('question', '')}  
-Answer: {row.get('answer', '')}
-Keywords: {row.get('keywords', '')}
-Context: {row.get('context', '')}
-Category: {row.get('category', '')}
-""".strip()
-            
-            if content:
-                metadata = {
-                    'id': row.get('id', ''),
-                    'topic': row.get('topic', ''),
-                    'category': row.get('category', ''),
-                    'source': 'ecombot_knowledge_base'
-                }
-                documents.append(Document(page_content=content, metadata=metadata))
 
-        logger.info(f"Processed {len(documents)} documents")
-
-        class SimpleCSVRetriever:
-            def __init__(self, docs):
-                self.docs = docs
-            
-            def get_relevant_documents(self, query):
-                query_lower = query.lower().strip()
-                scored_docs = []
-                
-                for doc in self.docs:
-                    score = 0
-                    content_lower = doc.page_content.lower()
-                    
-                    # Exact match scoring
-                    if query_lower in content_lower:
-                        score += 20
-                    
-                    # Individual word matching dengan bobot lebih tinggi
-                    query_words = query_lower.split()
-                    for word in query_words:
-                        if len(word) > 2:  # Kata dengan minimal 3 karakter
-                            if word in content_lower:
-                                score += 5
-                    
-                    # Boost score untuk dokumen yang sangat relevan
-                    if any(keyword in content_lower for keyword in ['ecombot', 'greenverse', 'pembuat', 'pencipta', 'tim']):
-                        score += 10
-                    
-                    if score > 0:
-                        scored_docs.append((score, doc))
-                
-                # Sort by score descending
-                scored_docs.sort(key=lambda x: x[0], reverse=True)
-                
-                # Return top documents
-                return [doc for score, doc in scored_docs[:5]]
-            
-            async def aget_relevant_documents(self, query):
-                return self.get_relevant_documents(query)
-        
-        retriever = SimpleCSVRetriever(documents)
-        logger.info("✅ Simple CSV retriever created successfully")
-        
-        # Test dengan query spesifik
-        test_query = "Siapa yang membuat ECOMBOT?"
-        test_docs = retriever.get_relevant_documents(test_query)
-        logger.info(f"🧪 Test retrieval for '{test_query}': Found {len(test_docs)} docs")
-        
-        for i, doc in enumerate(test_docs):
-            logger.info(f"   Test Doc {i+1}: {doc.page_content[:100]}...")
-        
-        return retriever
-        
-    except Exception as e:
-        logger.error(f"Error creating simple CSV retriever: {e}")
-        return None
-    
 def initialize_rag_system():
-    """Initialize the RAG system - menggunakan simple retriever untuk reliability"""
+    """Initialize the RAG system with enhanced error handling"""
     global retriever
     try:
-        logger.info("=== STARTING RAG INITIALIZATION (SIMPLE MODE) ===")
+        # Debug info
+        logger.info("=== STARTING RAG INITIALIZATION ===")
         
-        # Gunakan simple CSV retriever untuk reliability
-        retriever = create_simple_csv_retriever()
+        # Check if persisted vectorstore exists
+        if os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR):
+            logger.info("Found existing vectorstore, loading...")
+            try:
+                embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+                vectorstore = Chroma(persist_directory=PERSIST_DIR, embedding_function=embeddings)
+                retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
+                logger.info("[+] Loaded existing vectorstore successfully")
+                return retriever
+            except Exception as e:
+                logger.warning(f"Failed to load existing vectorstore: {e}. Rebuilding...")
         
-        if retriever:
-            logger.info("✅ RAG system initialized successfully dengan simple retriever")
-            return retriever
-        else:
-            logger.error("❌ Failed to initialize simple retriever")
+        # Check if CSV file exists
+        if not os.path.exists(CSV_PATH):
+            logger.error(f"CSV file not found: {CSV_PATH}")
+            # Create data directory if it doesn't exist
+            os.makedirs(os.path.dirname(CSV_PATH), exist_ok=True)
+            # Create fallback CSV file
+            create_fallback_csv()
+            logger.info("Created fallback CSV file")
+        
+        # Load and process CSV data
+        logger.info("Loading CSV data...")
+        df = pd.read_csv(CSV_PATH, dtype=str, on_bad_lines="skip").fillna("")
+        documents = []
+
+        for _, row in df.iterrows():
+            content_parts = []
+            if "topic" in df.columns and pd.notna(row.get('topic')): 
+                content_parts.append(f"Topik: {row['topic']}")
+            if "question" in df.columns and pd.notna(row.get('question')): 
+                content_parts.append(f"Pertanyaan: {row['question']}")
+            if "answer" in df.columns and pd.notna(row.get('answer')): 
+                content_parts.append(f"Jawaban: {row['answer']}")
+            if "context" in df.columns and pd.notna(row.get('context')): 
+                content_parts.append(f"Context: {row['context']}")
+            if "keywords" in df.columns and pd.notna(row.get('keywords')): 
+                content_parts.append(f"Keywords: {row['keywords']}")
+            if "related_topics" in df.columns and pd.notna(row.get('related_topics')): 
+                content_parts.append(f"Related topics: {row['related_topics']}")
+            
+            content = "\n\n".join(content_parts).strip()
+            if content:  # Only add if content is not empty
+                metadata = {col: row[col] for col in df.columns if col in ["id", "category", "topic"] and pd.notna(row.get(col))}
+                documents.append(Document(page_content=content, metadata=metadata))
+
+        logger.info(f"[+] Loaded {len(documents)} documents")
+
+        if not documents:
+            logger.warning("No documents found in CSV, using fallback data")
             return create_fallback_retriever()
+
+        # Split text into chunks
+        splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+        chunks = splitter.split_documents(documents)
+        logger.info(f"[+] Split into {len(chunks)} chunks")
+
+        # Create directory if it doesn't exist
+        os.makedirs(PERSIST_DIR, exist_ok=True)
+
+        # Embedding & Vectorstore
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        vectorstore = Chroma.from_documents(
+            chunks, 
+            embeddings, 
+            persist_directory=PERSIST_DIR
+        )
+        vectorstore.persist()
+        retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
+        logger.info("[+] Vectorstore created and persisted successfully")
+        
+        return retriever
         
     except Exception as e:
-        logger.error(f"❌ Error initializing RAG system: {e}")
+        logger.error(f"Error initializing RAG system: {e}")
+        logger.info("Using fallback retriever")
         return create_fallback_retriever()
-            
-    
+
 def create_fallback_csv():
     """Create a fallback CSV file with basic data"""
     try:
@@ -610,67 +520,19 @@ def create_fallback_csv():
         logger.info(f"Fallback CSV created at: {CSV_PATH}")
     except Exception as e:
         logger.error(f"Error creating fallback CSV: {e}")
-        
-    
 
-
-def initialize_all_systems():
-    """Initialize semua sistem sekaligus dengan error handling yang lebih baik"""
-    global gemini_model, chatbot_app, retriever
-    
-    logger.info("🔄 Initializing all systems...")
-    
-    status_report = {}
-    
-    # Initialize Gemini Model
-    try:
-        gemini_model = initialize_gemini_model()
-        status_report["gemini_model"] = "✅ Ready" if gemini_model else "❌ Failed"
-        logger.info(f"Gemini Model: {status_report['gemini_model']}")
-    except Exception as e:
-        logger.error(f"Gemini initialization failed: {e}")
-        status_report["gemini_model"] = f"❌ Failed: {str(e)}"
-        gemini_model = None
-    
-    # Initialize RAG System
-    try:
-        retriever = initialize_rag_system()
-        status_report["rag_system"] = "✅ Ready" if retriever else "❌ Failed"
-        logger.info(f"RAG System: {status_report['rag_system']}")
-    except Exception as e:
-        logger.error(f"RAG initialization failed: {e}")
-        status_report["rag_system"] = f"❌ Failed: {str(e)}"
-        retriever = None
-    
-    # Initialize LangGraph Chatbot
-    try:
-        if gemini_model:
-            chatbot_app = create_chatbot_graph()
-            status_report["langgraph_chatbot"] = "✅ Ready" if chatbot_app else "❌ Failed"
-        else:
-            status_report["langgraph_chatbot"] = "❌ Failed: No Gemini model"
-            chatbot_app = None
-        logger.info(f"LangGraph Chatbot: {status_report['langgraph_chatbot']}")
-    except Exception as e:
-        logger.error(f"LangGraph initialization failed: {e}")
-        status_report["langgraph_chatbot"] = f"❌ Failed: {str(e)}"
-        chatbot_app = None
-    
-    logger.info(f"System Status: {status_report}")
-    return status_report
-
-# Panggil initialization dengan error handling
+# Initialize RAG system dengan error handling
 try:
-    initialize_all_systems()
+    logger.info("Attempting to initialize RAG system...")
+    rag_status = initialize_rag_system()
+    if rag_status:
+        logger.info("✅ RAG system initialized successfully")
+    else:
+        logger.warning("⚠️ RAG system initialization failed, using fallback")
 except Exception as e:
-    logger.error(f"Failed to initialize systems: {e}")
-    
-    
-# Initialize semua sistem
-initialize_all_systems()
+    logger.error(f"❌ RAG system initialization error: {e}")
 
-# ===== VIEWS UTAMA =====
-
+# ===== VIEWS PERTAMA (EXISTING) =====
 @api_view(['POST'])
 def register(request):
     try:
@@ -688,12 +550,20 @@ def register(request):
     except IntegrityError:
         return Response({'error': 'Username already exists'}, status=400)
 
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.decorators import permission_classes
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def ecombot(request):
     return Response({
         "message": f"Halo, {request.user.username}! Ini halaman profil kamu."
     })
+
+
+from django.http import JsonResponse
+from django.conf import settings
+from .utils.cloudinary_utils import get_optimized_resources
 
 def manifest(request, comic_slug, episode_slug):
     prefix = f"comics/{comic_slug}/{episode_slug}"
@@ -715,6 +585,13 @@ def manifest(request, comic_slug, episode_slug):
     }
     
     return JsonResponse(manifest)
+
+
+from .models import UserComicProgress
+
+from rest_framework import status
+
+REQUIRED_PAGE_THRESHOLD = 3  # indeks (0-based), berarti halaman ke-4
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
@@ -781,21 +658,24 @@ def comic_progress(request):
             "last_page": progress.last_page
         })
 
+
+
+from rest_framework import status
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def comic_mark_finish(request):
     """
     POST /api/comic-progress/finish/
     body: { "comic": "...", "episode": "...", "last_page": 3, "complete": true }
+    Jika client mengirim "complete": true -> set finish=True langsung untuk user itu.
     """
     user = request.user
     comic = request.data.get("comic")
     episode = request.data.get("episode")
     last_page_body = request.data.get("last_page")
-    complete_flag = bool(request.data.get("complete", False))
-    force = bool(request.data.get("force", False))
-
-    REQUIRED_PAGE_THRESHOLD = 3
+    complete_flag = bool(request.data.get("complete", False))  # <-- new flag
+    force = bool(request.data.get("force", False))  # tetap ada untuk admin override if needed
 
     if not comic or not episode:
         return Response({"error": "Missing comic or episode"}, status=status.HTTP_400_BAD_REQUEST)
@@ -821,6 +701,7 @@ def comic_mark_finish(request):
         progress.finish = True
         progress.save()
         return Response({"saved": True, "finish": True, "message": "Marked as complete by user"})
+
 
     # Force (untuk staff/admin)
     if force and user.is_staff:
@@ -853,7 +734,7 @@ def comic_mark_finish(request):
         )
 
 @api_view(['POST', 'GET'])
-@permission_classes([AllowAny])
+@permission_classes([AllowAny])  # ✅ tidak perlu login
 def feedback_view(request):
     if request.method == 'POST':
         serializer = FeedbackSerializer(data=request.data)
@@ -867,6 +748,9 @@ def feedback_view(request):
         serializer = FeedbackSerializer(feedbacks, many=True)
         return Response(serializer.data)
 
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -877,228 +761,91 @@ class LogoutView(APIView):
                 return Response({"detail": "Refresh token tidak diberikan"}, status=status.HTTP_400_BAD_REQUEST)
 
             token = RefreshToken(refresh_token)
-            token.blacklist()
+            token.blacklist()  # blacklist token agar tidak bisa dipakai lagi
             return Response({"detail": "Logout berhasil"}, status=status.HTTP_205_RESET_CONTENT)
         except TokenError:
             return Response({"detail": "Token tidak valid atau sudah kadaluarsa"}, status=status.HTTP_400_BAD_REQUEST)
 
-# ===== CHATBOT VIEWS DENGAN LANGGRAPH =====
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def start_chat_session(request):
-    """Memulai sesi chat baru dengan LangGraph"""
+
+
+
+
+
+
+
+
+
+
+# ===== FUNGSI GEMINI YANG DIPERBAIKI =====
+
+def query_gemini(prompt):
+    """Query Gemini API dengan enhanced error handling"""
     try:
-        session_id = request.data.get('session_id', f"session_{timezone.now().strftime('%Y%m%d_%H%M%S')}")
-        activity_id = request.data.get('activity_id', 'intro')
+        # Debug API key sebelum digunakan
+        print(f"=== DEBUG query_gemini: API_KEY available: {bool(API_KEY)} ===")
         
-        # Buat atau dapatkan session
-        session, created = ChatSession.objects.get_or_create(
-            user=request.user,
-            session_id=session_id,
-            defaults={
-                'current_step': activity_id,
-                'status': 'active'
-            }
-        )
-        
-        # Jika session baru, inisialisasi di LangGraph
-        if created and chatbot_app:
-            config = {"configurable": {"thread_id": session_id}}
-            
-            # Buat pesan pembuka
-            opening_message = "Halo! 👋 Saya Aquano, asisten pembelajaran Ecombot. Saya siap membantu Anda menjelajahi dunia Kimia Hijau dan Tradisi Mapag Hujan. Ada yang bisa saya bantu hari ini?"
-            
-            # Simpan ke database
-            ChatMessage.objects.create(
-                session=session,
-                message_type='bot',
-                character='Aquano',
-                message_text=opening_message,
-                step_id=activity_id,
-                activity_id=activity_id
-            )
-            
-            # Buat user progress
-            UserProgress.objects.create(
-                user=request.user,
-                session=session,
-                current_kegiatan=activity_id,
-                total_answers=0,
-            )
-        
-        return Response({
-            'status': 'success',
-            'session_id': session.session_id,
-            'current_activity': session.current_step,
-            'message': 'Sesi chat berhasil dimulai'
-        })
-        
-    except Exception as e:
-        logger.error(f"Error starting chat session: {e}")
-        return Response({
-            'status': 'error',
-            'message': 'Gagal memulai sesi chat'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        if not API_KEY:
+            error_msg = "API key tidak ditemukan. Pastikan GEMINI_API_KEY sudah di-set di file .env"
+            logger.error(error_msg)
+            return f"Maaf, {error_msg}. Silakan hubungi administrator."
 
-def send_chat_message_fallback(session, message_text, activity_id):
-    """Fallback method jika LangGraph tidak tersedia"""
-    try:
-        # Gunakan RAG system langsung
-        if retriever:
-            try:
-                docs = retriever.get_relevant_documents(message_text)
-                context = "\n\n".join([d.page_content for d in docs[:2]])
-                
-                prompt = f"""
-KONTEKS:
-{context}
+        # Validasi format API key
+        if not API_KEY.startswith('AIza'):
+            error_msg = f"Format API key tidak valid. Harus dimulai dengan 'AIza'. Dapatkan: {API_KEY[:10]}..."
+            logger.error(error_msg)
+            return f"Maaf, {error_msg}. Silakan periksa kunci API Gemini Anda."
 
-PERTANYAAN USER:
-{message_text}
-
-JAWABAN (gunakan bahasa Indonesia yang jelas dan membantu):
-"""
-            except Exception as rag_error:
-                logger.error(f"RAG error: {rag_error}")
-                prompt = message_text
-        else:
-            prompt = message_text
-        
-        # Gunakan Gemini langsung
-        if gemini_model:
-            response = gemini_model.invoke(prompt)
-            bot_response = response.content
-        else:
-            bot_response = "Maaf, sistem sedang dalam perbaikan. Silakan coba lagi nanti."
-        
-        # Simpan ke database
-        bot_message = ChatMessage.objects.create(
-            session=session,
-            message_type='bot',
-            character='Aquano',
-            message_text=bot_response,
-            step_id=activity_id,
-            activity_id=activity_id
-        )
-        
-        session.current_step = activity_id
-        session.save()
-        
-        return Response({
-            'status': 'success',
-            'message_id': bot_message.id,
-            'timestamp': bot_message.timestamp,
-            'response': bot_response,
-            'session_id': session.session_id
-        })
-        
-    except Exception as e:
-        logger.error(f"Error in fallback chat: {e}")
-        return Response({
-            'status': 'error',
-            'message': 'Gagal memproses pesan'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def send_chat_message(request):
-    """Mengirim pesan dan mendapatkan respons menggunakan LangGraph"""
-    try:
-        session_id = request.data.get('session_id')
-        message_text = request.data.get('message_text')
-        activity_id = request.data.get('activity_id', 'general')
-        
-        if not all([session_id, message_text]):
-            return Response({
-                'status': 'error',
-                'message': 'session_id dan message_text diperlukan'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Dapatkan session
+        # Initialize client dengan cara yang benar
         try:
-            session = ChatSession.objects.get(session_id=session_id, user=request.user)
-        except ChatSession.DoesNotExist:
-            return Response({
-                'status': 'error',
-                'message': 'Sesi tidak ditemukan'
-            }, status=status.HTTP_404_NOT_FOUND)
-        
-        # Simpan pesan user ke database
-        user_message = ChatMessage.objects.create(
-            session=session,
-            message_type='user',
-            character='User',
-            message_text=message_text,
-            step_id=activity_id,
-            activity_id=activity_id
-        )
-        
-        # Process dengan LangGraph jika tersedia
-        if chatbot_app:
-            try:
-                config = {"configurable": {"thread_id": session_id}}
-                
-                # Prepare state untuk LangGraph
-                input_state = {
-                    "messages": [HumanMessage(content=message_text)],
-                    "session_id": session_id,
-                    "user_id": str(request.user.id),
-                    "current_activity": activity_id
-                }
-                
-                # Invoke LangGraph
-                output = chatbot_app.invoke(input_state, config)
-                
-                # Dapatkan respons terakhir
-                bot_response = None
-                for msg in reversed(output["messages"]):
-                    if isinstance(msg, AIMessage):
-                        bot_response = msg.content
-                        break
-                
-                if bot_response:
-                    # Simpan respons bot ke database
-                    bot_message = ChatMessage.objects.create(
-                        session=session,
-                        message_type='bot',
-                        character='Aquano',
-                        message_text=bot_response,
-                        step_id=activity_id,
-                        activity_id=activity_id
-                    )
-                    
-                    # Update session
-                    session.current_step = activity_id
-                    session.save()
-                    
-                    return Response({
-                        'status': 'success',
-                        'message_id': bot_message.id,
-                        'timestamp': bot_message.timestamp,
-                        'response': bot_response,
-                        'session_id': session_id
-                    })
-                    
-            except Exception as graph_error:
-                logger.error(f"LangGraph error: {graph_error}")
-                # Fallback ke sistem lama jika LangGraph gagal
-                return send_chat_message_fallback(session, message_text, activity_id)
-        else:
-            # Fallback jika LangGraph tidak tersedia
-            return send_chat_message_fallback(session, message_text, activity_id)
+            # PERBAIKAN: Konfigurasi yang benar untuk google-generativeai
+            genai.configure(api_key=API_KEY)
+            print("=== DEBUG: Gemini client configured successfully ===")
+        except Exception as client_error:
+            logger.error(f"Error configuring Gemini client: {client_error}")
+            return f"Maaf, gagal mengkonfigurasi klien Gemini: {str(client_error)}"
+
+        # Generate content
+        try:
+            print("=== DEBUG: Sending request to Gemini API ===")
             
+            # PERBAIKAN: Gunakan model yang benar
+            model = genai.GenerativeModel(MODEL)
+            response = model.generate_content(prompt)
+            
+            print("=== DEBUG: Received response from Gemini API ===")
+            
+            if hasattr(response, 'text'):
+                return response.text
+            else:
+                logger.error(f"Unexpected response format: {response}")
+                return "Maaf, format respons dari API tidak dikenali."
+                
+        except Exception as gen_error:
+            logger.error(f"Error generating content: {gen_error}")
+            error_str = str(gen_error)
+            
+            if "quota" in error_str.lower():
+                return "Maaf, kuota API telah habis. Silakan coba lagi nanti atau hubungi administrator."
+            elif "permission" in error_str.lower() or "invalid" in error_str.lower():
+                return "Maaf, API key tidak valid atau tidak memiliki izin. Silakan periksa kunci API Anda."
+            elif "network" in error_str.lower() or "connection" in error_str.lower():
+                return "Maaf, terjadi masalah koneksi. Silakan periksa koneksi internet Anda dan coba lagi."
+            elif "safety" in error_str.lower():
+                return "Maaf, pertanyaan Anda ditolak oleh filter keamanan. Silakan coba dengan pertanyaan lain."
+            else:
+                return f"Maaf, terjadi kesalahan saat memproses pertanyaan: {error_str}"
+        
     except Exception as e:
-        logger.error(f"Error in send_chat_message: {e}")
-        return Response({
-            'status': 'error',
-            'message': 'Gagal mengirim pesan'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        logger.error(f"Unexpected error in query_gemini: {e}")
+        return f"Maaf, terjadi kesalahan tak terduga: {str(e)}. Silakan coba lagi."
+
+# ===== ENDPOINT RAG YANG DIPERBAIKI =====
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def ask_question(request):
-    """Handle question asking dengan RAG system atau fallback"""
+    """Handle question asking with RAG system - ENHANCED VERSION"""
     try:
         question = request.data.get('question', '').strip()
         
@@ -1108,779 +855,102 @@ def ask_question(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        logger.info(f"🔍 Processing question: '{question}'")
+        logger.info(f"Processing question: '{question}'")
         
-        # Get relevant documents from RAG system atau fallback
+        # Get relevant documents from RAG system
         context = ""
         relevant_docs = []
-        rag_status = "fallback"
         
         if retriever:
             try:
                 docs = retriever.get_relevant_documents(question)
-                logger.info(f"📄 Retrieved {len(docs)} documents for question: '{question}'")
-                
-                # LOG DETAIL SETIAP DOKUMEN YANG DITEMUKAN
-                for i, doc in enumerate(docs):
-                    logger.info(f"   📝 Doc {i+1} Content: {doc.page_content}")
-                    logger.info(f"   🏷️  Doc {i+1} Metadata: {doc.metadata}")
-                    logger.info("   " + "-" * 50)
-                
-                context = "\n\n".join([f"Dokumen {i+1}:\n{d.page_content}" for i, d in enumerate(docs)])
+                context = "\n\n".join([d.page_content for d in docs])
                 relevant_docs = docs
-                rag_status = "active" if docs else "no_docs"
-                
+                logger.info(f"Retrieved {len(docs)} documents for question")
             except Exception as e:
-                logger.error(f"❌ Error retrieving documents: {e}")
-                context = "Sistem pencarian informasi sedang dalam perbaikan."
-                rag_status = "error"
+                logger.error(f"Error retrieving documents: {e}")
+                context = "Informasi dari database sedang tidak tersedia."
         else:
-            logger.warning("RAG system not available, using direct Gemini")
+            logger.warning("RAG system not available, using fallback")
             context = "Sistem pencarian informasi sedang dalam perbaikan."
-            rag_status = "not_available"
         
-        # Prepare prompt dengan konteks yang lebih jelas
-        if context and rag_status == "active":
-            full_prompt = f"""
-INFORMASI KONTEKS YANG DITEMUKAN:
+        # Prepare enhanced prompt for Gemini
+        full_prompt = f"""
+Anda adalah asisten ahli bernama Ecombot yang memiliki pengetahuan tentang:
+
+TOPIK UTAMA:
+1. Kimia Hijau (Green Chemistry) dan 12 prinsipnya
+2. Tradisi Mapag Hujan di Jawa Barat (Bandung dan Subang)
+3. Filosofi Sunda seperti Seba Tangkal Muru Cai
+4. Program Maraton Bebersih Walungan dan Susukan
+5. Konservasi lingkungan dan mitigasi banjir
+6. Pendidikan STEM (Science, Technology, Engineering, Arts, Mathematics)
+
+INFORMASI KONTEKS:
 {context}
 
 PERTANYAAN USER:
 {question}
 
-INSTRUKSI: 
-- Jawab pertanyaan berdasarkan informasi dalam konteks di atas
-- Jika informasi tersedia dalam konteks, berikan jawaban yang akurat
-- Jika informasi tidak tersedia dalam konteks, jelaskan bahwa informasi tidak ditemukan
-- Gunakan bahasa Indonesia yang jelas dan informatif
+INSTRUKSI:
+1. Jawablah dengan bahasa Indonesia yang jelas dan mudah dipahami
+2. Jika informasi dari konteks tidak cukup, gunakan pengetahuan umum Anda
+3. Fokus pada topik-topik utama di atas
+4. Berikan jawaban yang informatif dan membantu
+5. Jika pertanyaan di luar topik, jelaskan dengan sopan dan arahkan ke topik yang relevan
 
 JAWABAN:
 """
-        else:
-            full_prompt = f"""
-PERTANYAAN USER:
-{question}
-
-JAWABAN (gunakan bahasa Indonesia yang jelas dan informatif. Jika tidak tahu jawabannya, jelaskan bahwa informasi tidak tersedia):
-"""
         
         # Get answer from Gemini
-        answer = "Maaf, sistem AI sedang tidak tersedia. Silakan coba lagi nanti."
-        if gemini_model:
-            try:
-                logger.info(f"🤖 Sending prompt to Gemini...")
-                response = gemini_model.invoke(full_prompt)
-                answer = response.content.strip()
-                logger.info(f"✅ Gemini response: {answer[:200]}...")
-            except Exception as gemini_error:
-                logger.error(f"❌ Gemini error: {gemini_error}")
-                answer = "Maaf, terjadi kesalahan saat memproses pertanyaan Anda."
+        answer = query_gemini(full_prompt)
         
-        # Log the interaction
-        logger.info(f"📊 Summary - Q: '{question}' | A: {answer[:100]}... | RAG: {rag_status} | Docs: {len(relevant_docs)}")
+        # Log the interaction for debugging
+        logger.info(f"Q: {question} | A: {answer[:100]}... | Docs: {len(relevant_docs)}")
         
         return Response({
-            "answer": answer,
+            "answer": answer.strip(),
             "sources_count": len(relevant_docs),
-            "rag_system": rag_status
+            "rag_system": "active" if retriever and relevant_docs else "fallback"
         })
         
     except Exception as e:
-        logger.error(f"❌ Unexpected error in ask_question: {e}")
+        logger.error(f"Unexpected error in ask_question: {e}")
         return Response(
-            {"answer": "Maaf, terjadi kesalahan sistem. Silakan coba lagi dalam beberapa saat."}, 
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-        
-        
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def submit_activity_answer(request):
-    """Menyimpan jawaban user untuk activity tertentu"""
-    try:
-        session_id = request.data.get('session_id')
-        activity_id = request.data.get('activity_id')
-        question_data = request.data.get('question_data', {})
-        answer_text = request.data.get('answer_text', '')
-        answer_type = request.data.get('answer_type', 'essay')
-        
-        if not all([session_id, activity_id]):
-            return Response({
-                'status': 'error',
-                'message': 'Session ID dan Activity ID diperlukan'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Dapatkan session
-        try:
-            session = ChatSession.objects.get(session_id=session_id, user=request.user)
-        except ChatSession.DoesNotExist:
-            return Response({
-                'status': 'error',
-                'message': 'Sesi tidak ditemukan'
-            }, status=status.HTTP_404_NOT_FOUND)
-        
-        # Extract question data
-        if isinstance(question_data, str):
-            try:
-                question_data = json.loads(question_data)
-            except:
-                question_data = {}
-        
-        question_id = question_data.get('id') or f"question_{int(timezone.now().timestamp())}"
-        storage_key = question_data.get('storage_key') or f"storage_{question_id}"
-        question_text = question_data.get('text') or question_data.get('question_text') or 'Pertanyaan tidak tersedia'
-        
-        # Cek atau buat jawaban
-        existing_answer = UserAnswer.objects.filter(
-            session=session,
-            question_id=question_id
-        ).first()
-        
-        if existing_answer:
-            existing_answer.answer_text = answer_text
-            existing_answer.answer_type = answer_type
-            existing_answer.question_text = question_text
-            existing_answer.step_id = activity_id
-            existing_answer.activity_id = activity_id
-            existing_answer.is_submitted = True
-            existing_answer.submitted_at = timezone.now()
-            existing_answer.save()
-            answer = existing_answer
-            action = 'updated'
-        else:
-            answer = UserAnswer.objects.create(
-                session=session,
-                question_id=question_id,
-                storage_key=storage_key,
-                answer_text=answer_text,
-                answer_type=answer_type,
-                question_text=question_text,
-                step_id=activity_id,
-                activity_id=activity_id,
-                is_submitted=True,
-                submitted_at=timezone.now()
-            )
-            action = 'created'
-        
-        # Update progress
-        user_progress, created = UserProgress.objects.get_or_create(
-            user=request.user,
-            session=session,
-            defaults={
-                'current_kegiatan': activity_id,
-                'total_answers': 1,
-            }
-        )
-        
-        if not created:
-            total_submitted = UserAnswer.objects.filter(
-                session=session, 
-                is_submitted=True
-            ).count()
-            user_progress.total_answers = total_submitted
-            user_progress.current_kegiatan = activity_id
-            user_progress.save()
-        
-        # Update activity progress
-        activity_progress, created = ActivityProgress.objects.get_or_create(
-            session=session,
-            activity_id=activity_id,
-            defaults={
-                'status': 'completed',
-                'completed_at': timezone.now()
-            }
-        )
-        
-        if not created:
-            activity_progress.status = 'completed'
-            activity_progress.completed_at = timezone.now()
-            activity_progress.save()
-        
-        # Response data
-        answer_data = {
-            'id': answer.id,
-            'question_id': answer.question_id,
-            'answer_text': answer.answer_text,
-            'answer_type': answer.answer_type,
-            'question_text': answer.question_text,
-            'activity_id': answer.activity_id,
-            'is_submitted': answer.is_submitted,
-            'submitted_at': answer.submitted_at.isoformat() if answer.submitted_at else None,
-        }
-        
-        completed_activities_count = ActivityProgress.objects.filter(
-            session=session,
-            status='completed'
-        ).count()
-        
-        return Response({
-            'status': 'success',
-            'message': 'Jawaban berhasil disimpan',
-            'action': action,
-            'answer': answer_data,
-            'progress': {
-                'total_answers': user_progress.total_answers,
-                'current_activity': user_progress.current_kegiatan,
-                'completed_activities_count': completed_activities_count
-            }
-        })
-        
-    except Exception as e:
-        logger.error(f"Error submitting activity answer: {str(e)}")
-        return Response({
-            'status': 'error',
-            'message': f'Gagal menyimpan jawaban: {str(e)}'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def complete_activity(request):
-    """Menandai activity sebagai selesai"""
-    try:
-        session_id = request.data.get('session_id')
-        activity_id = request.data.get('activity_id')
-        
-        if not session_id or not activity_id:
-            return Response({
-                'status': 'error',
-                'message': 'Session ID dan Activity ID diperlukan'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Dapatkan session
-        try:
-            session = ChatSession.objects.get(session_id=session_id, user=request.user)
-        except ChatSession.DoesNotExist:
-            return Response({
-                'status': 'error',
-                'message': 'Sesi tidak ditemukan'
-            }, status=status.HTTP_404_NOT_FOUND)
-        
-        # Tandai activity sebagai selesai
-        activity_progress, created = ActivityProgress.objects.get_or_create(
-            session=session,
-            activity_id=activity_id,
-            defaults={
-                'status': 'completed',
-                'completed_at': timezone.now()
-            }
-        )
-        
-        if not created:
-            activity_progress.status = 'completed'
-            activity_progress.completed_at = timezone.now()
-            activity_progress.save()
-        
-        return Response({
-            'status': 'success',
-            'message': f'Activity {activity_id} berhasil diselesaikan'
-        })
-        
-    except Exception as e:
-        logger.error(f"Error completing activity: {e}")
-        return Response({
-            'status': 'error',
-            'message': 'Gagal menandai activity sebagai selesai'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-# ===== TEACHER VIEWS =====
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def verify_teacher_password(request):
-    """Verifikasi password guru dari .env file"""
-    try:
-        input_password = request.data.get('password', '')
-        
-        # Ambil password dari .env
-        correct_password = os.getenv('TEACHER_PASSWORD', 'greenverse2024')
-        
-        if not input_password:
-            return Response(
-                {
-                    'success': False,
-                    'message': 'Password tidak boleh kosong'
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Verifikasi password
-        if input_password == correct_password:
-            return Response(
-                {
-                    'success': True,
-                    'message': 'Password benar'
-                },
-                status=status.HTTP_200_OK
-            )
-        else:
-            return Response(
-                {
-                    'success': False,
-                    'message': 'Password salah'
-                },
-                status=status.HTTP_401_UNAUTHORIZED
-            )
-            
-    except Exception as e:
-        print(f"Error in verify_teacher_password: {str(e)}")
-        return Response(
-            {
-                'success': False,
-                'message': 'Terjadi kesalahan server'
-            },
+            {"answer": "Maaf, terjadi kesalahan sistem. Silakan coba lagi dalam beberapa saat atau hubungi administrator."}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-from django.core.paginator import Paginator
-from django.db.models import Q, Count
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def teacher_answers(request):
-    """GET /api/teacher/answers/"""
-    try:
-        # Query dengan filter untuk memastikan data valid
-        qs = UserAnswer.objects.select_related(
-            "session__user"
-        ).exclude(
-            session__isnull=True
-        ).exclude(
-            session__user__isnull=True
-        )
-
-        # Filter berdasarkan query params
-        q = request.GET.get("q", "").strip()
-        activity = request.GET.get("activity", "").strip()
-        answer_type = request.GET.get("answer_type", "").strip()
-        date_from = request.GET.get("date_from", "").strip()
-        date_to = request.GET.get("date_to", "").strip()
-        ordering = request.GET.get("ordering", "-created_at")
-
-        # Search filter
-        if q:
-            qs = qs.filter(
-                Q(session__user__username__icontains=q) |
-                Q(answer_text__icontains=q) |
-                Q(question_text__icontains=q)
-            )
-        
-        # Activity filter
-        if activity:
-            qs = qs.filter(activity_id__icontains=activity)
-        
-        # Answer type filter
-        if answer_type:
-            qs = qs.filter(answer_type=answer_type)
-        
-        # Date range filter
-        if date_from:
-            try:
-                qs = qs.filter(created_at__date__gte=date_from)
-            except Exception as e:
-                print(f"Invalid date_from format: {e}")
-        
-        if date_to:
-            try:
-                qs = qs.filter(created_at__date__lte=date_to)
-            except Exception as e:
-                print(f"Invalid date_to format: {e}")
-
-        # Ordering validation
-        allowed_orderings = ['created_at', '-created_at', 'updated_at', '-updated_at']
-        if ordering not in allowed_orderings:
-            ordering = '-created_at'
-        qs = qs.order_by(ordering)
-
-        # Pagination
-        page = int(request.GET.get("page", 1))
-        page_size = int(request.GET.get("page_size", 25))
-        page_size = min(page_size, 100)
-        
-        paginator = Paginator(qs, page_size)
-        
-        try:
-            page_obj = paginator.get_page(page)
-        except Exception as e:
-            return Response(
-                {"error": f"Pagination error: {str(e)}"}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Build response data
-        data = []
-        start_no = (page_obj.number - 1) * page_size + 1
-        
-        for idx, answer in enumerate(page_obj.object_list, start=start_no):
-            # Safe data extraction
-            try:
-                username = answer.session.user.username if (answer.session and answer.session.user) else "Unknown"
-            except:
-                username = "Unknown"
-            
-            activity_name = answer.activity_id or answer.step_id or "-"
-            
-            # Format tanggal dengan fallback
-            try:
-                tanggal = answer.created_at.strftime("%Y-%m-%d %H:%M") if answer.created_at else "-"
-            except:
-                tanggal = "-"
-            
-            data.append({
-                "no": idx,
-                "id": answer.id,
-                "nama_siswa": username,
-                "kegiatan": activity_name,
-                "jenis_pertanyaan": answer.answer_type or "essay",
-                "pertanyaan": answer.question_text or "-",
-                "jawaban_siswa": answer.answer_text or "-",
-                "image_url": answer.image_url or None,
-                "tipe_jawaban": answer.answer_type or "essay",
-                "status": "Submitted" if answer.is_submitted else "Draft",
-                "tanggal_dikirim": tanggal,
-            })
-
-        # Metadata
-        meta = {
-            "page": page_obj.number,
-            "page_size": page_size,
-            "total_pages": paginator.num_pages,
-            "total_items": paginator.count,
-            "has_next": page_obj.has_next(),
-            "has_previous": page_obj.has_previous(),
-        }
-        
-        return Response({
-            "meta": meta, 
-            "results": data
-        }, status=status.HTTP_200_OK)
-    
-    except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print("ERROR in teacher_answers:")
-        print(str(e))
-        print(error_trace)
-        
-        return Response(
-            {
-                "error": str(e), 
-                "detail": "Internal server error",
-            }, 
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def teacher_dashboard(request):
-    """GET /api/teacher/dashboard/"""
-    try:
-        # Get all users
-        users = User.objects.all().order_by('username')
-
-        # Filter by username
-        username_filter = request.GET.get("username", "").strip()
-        if username_filter:
-            users = users.filter(username__icontains=username_filter)
-
-        data_list = []
-        
-        for user in users:
-            try:
-                # Dapatkan data comic progress
-                comic_progress = UserComicProgress.objects.filter(
-                    user=user
-                ).order_by('-updated_at').first()
-                
-                # Dapatkan chat session
-                chat_session = ChatSession.objects.filter(
-                    user=user
-                ).order_by('-updated_at').first()
-                
-                # Dapatkan user progress
-                user_progress = UserProgress.objects.filter(
-                    user=user
-                ).order_by('-updated_at').first()
-                
-                # Dapatkan activity progress terakhir
-                last_activity = ActivityProgress.objects.filter(
-                    session__user=user
-                ).order_by('-last_accessed').first()
-                
-                # Hitung total jawaban
-                total_answers = UserAnswer.objects.filter(
-                    session__user=user,
-                    is_submitted=True
-                ).count()
-                
-                # Data Komik
-                if comic_progress:
-                    comic_name = f"{comic_progress.comic_slug} - {comic_progress.episode_slug}"
-                    last_page = comic_progress.last_page
-                    comic_status = "Selesai" if comic_progress.finish else "Belum Selesai"
-                else:
-                    comic_name = "-"
-                    last_page = 0
-                    comic_status = "Belum Mulai"
-                
-                # Data Chat/Kegiatan
-                if chat_session:
-                    chat_status_value = chat_session.status
-                    current_step = chat_session.current_step
-                else:
-                    chat_status_value = "not_started"
-                    current_step = "-"
-                
-                # Kegiatan terakhir
-                if last_activity:
-                    last_kegiatan = last_activity.activity_id
-                    kegiatan_status = last_activity.status
-                elif user_progress:
-                    last_kegiatan = user_progress.current_kegiatan
-                    kegiatan_status = "in_progress"
-                else:
-                    last_kegiatan = "-"
-                    kegiatan_status = "not_started"
-                
-                data_list.append({
-                    "siswa": user.username,
-                    "user_id": user.id,
-                    
-                    # Data Komik
-                    "komik": comic_name,
-                    "halaman_terakhir": last_page,
-                    "status_komik": comic_status,
-                    
-                    # Data Kegiatan Pembelajaran
-                    "chat_status": chat_status_value,
-                    "current_step": current_step,
-                    "kegiatan_terakhir": last_kegiatan,
-                    "status_kegiatan": kegiatan_status,
-                    
-                    # Statistik
-                    "jawaban_terkumpul": total_answers,
-                    
-                    # Timestamp
-                    "terakhir_aktif": (
-                        chat_session.updated_at.strftime("%Y-%m-%d %H:%M")
-                        if chat_session and chat_session.updated_at
-                        else "-"
-                    )
-                })
-                
-            except Exception as e:
-                print(f"Error processing user {user.username}: {str(e)}")
-                continue
-
-        # Filter setelah data terbentuk
-        komik_filter = request.GET.get("komik", "").strip()
-        status_komik_filter = request.GET.get("status_komik", "").strip()
-        chat_status_filter = request.GET.get("chat_status", "").strip()
-        
-        if komik_filter:
-            data_list = [
-                d for d in data_list 
-                if komik_filter.lower() in d['komik'].lower()
-            ]
-        
-        if status_komik_filter:
-            data_list = [
-                d for d in data_list 
-                if d['status_komik'].lower() == status_komik_filter.lower()
-            ]
-        
-        if chat_status_filter:
-            data_list = [
-                d for d in data_list 
-                if str(d['chat_status']).lower() == chat_status_filter.lower()
-            ]
-
-        # Pagination
-        page = int(request.GET.get("page", 1))
-        page_size = int(request.GET.get("page_size", 25))
-        page_size = min(page_size, 100)
-        
-        paginator = Paginator(data_list, page_size)
-        page_obj = paginator.get_page(page)
-
-        # Metadata
-        meta = {
-            "page": page_obj.number,
-            "page_size": page_size,
-            "total_pages": paginator.num_pages,
-            "total_items": paginator.count,
-            "has_next": page_obj.has_next(),
-            "has_previous": page_obj.has_previous(),
-        }
-        
-        return Response({
-            "meta": meta, 
-            "results": list(page_obj)
-        }, status=status.HTTP_200_OK)
-    
-    except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print("ERROR in teacher_dashboard:")
-        print(str(e))
-        
-        return Response(
-            {
-                "error": str(e), 
-                "detail": "Internal server error",
-            }, 
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def teacher_student_detail(request, username):
-    """GET /api/teacher/student/<username>/"""
-    try:
-        user = User.objects.get(username=username)
-        
-        # Comic Progress
-        comic_progress_list = UserComicProgress.objects.filter(
-            user=user
-        ).order_by('-updated_at')
-        
-        comics_data = [{
-            "comic_slug": cp.comic_slug,
-            "episode_slug": cp.episode_slug,
-            "last_page": cp.last_page,
-            "finish": cp.finish,
-            "updated_at": cp.updated_at.strftime("%Y-%m-%d %H:%M")
-        } for cp in comic_progress_list]
-        
-        # Chat Sessions
-        chat_sessions = ChatSession.objects.filter(
-            user=user
-        ).order_by('-updated_at')
-        
-        sessions_data = [{
-            "session_id": cs.session_id,
-            "current_step": cs.current_step,
-            "status": cs.status,
-            "created_at": cs.created_at.strftime("%Y-%m-%d %H:%M"),
-            "updated_at": cs.updated_at.strftime("%Y-%m-%d %H:%M")
-        } for cs in chat_sessions]
-        
-        # Activity Progress
-        activity_progress_list = ActivityProgress.objects.filter(
-            session__user=user
-        ).order_by('activity_id')
-        
-        activities_data = [{
-            "activity_id": ap.activity_id,
-            "status": ap.status,
-            "last_accessed": ap.last_accessed.strftime("%Y-%m-%d %H:%M"),
-            "completed_at": ap.completed_at.strftime("%Y-%m-%d %H:%M") if ap.completed_at else None
-        } for ap in activity_progress_list]
-        
-        # Answers
-        total_answers = UserAnswer.objects.filter(
-            session__user=user,
-            is_submitted=True
-        ).count()
-        
-        # Statistics
-        answers_by_activity = UserAnswer.objects.filter(
-            session__user=user,
-            is_submitted=True
-        ).values('activity_id').annotate(
-            count=Count('id')
-        ).order_by('activity_id')
-        
-        return Response({
-            "username": username,
-            "user_id": user.id,
-            "comics": comics_data,
-            "chat_sessions": sessions_data,
-            "activities": activities_data,
-            "statistics": {
-                "total_answers": total_answers,
-                "answers_by_activity": list(answers_by_activity)
-            }
-        }, status=status.HTTP_200_OK)
-        
-    except User.DoesNotExist:
-        return Response(
-            {"error": "User tidak ditemukan"}, 
-            status=status.HTTP_404_NOT_FOUND
-        )
-    except Exception as e:
-        import traceback
-        print(f"Error in teacher_student_detail: {str(e)}")
-        print(traceback.format_exc())
-        return Response(
-            {"error": str(e)}, 
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-# ===== DEBUG & HEALTH ENDPOINTS =====
+# ===== ENDPOINT DEBUG & HEALTH CHECK =====
 
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def health_check(request):
     """Health check endpoint dengan debugging detail"""
-    try:
-        # Test each system
-        gemini_test = False
-        if gemini_model:
-            try:
-                test_response = gemini_model.invoke("Test")
-                gemini_test = bool(test_response and hasattr(test_response, 'content'))
-            except:
-                gemini_test = False
-        
-        rag_test = False
-        if retriever:
-            try:
-                test_docs = retriever.get_relevant_documents("test")
-                rag_test = len(test_docs) > 0
-            except:
-                rag_test = False
-        
-        langgraph_test = bool(chatbot_app)
-        
-        systems_status = {
-            "rag_system": "✅ Ready" if rag_test else "❌ Failed",
-            "langgraph_chatbot": "✅ Ready" if langgraph_test else "❌ Failed",
-            "gemini_model": "✅ Ready" if gemini_test else "❌ Failed"
+    rag_status = "initialized" if retriever else "failed"
+    api_key_info = {
+        "available": bool(API_KEY),
+        "length": len(API_KEY) if API_KEY else 0,
+        "starts_with": API_KEY[:10] + "..." if API_KEY else "N/A"
+    }
+    
+    # Check file existence
+    csv_exists = os.path.exists(CSV_PATH)
+    persist_exists = os.path.exists(PERSIST_DIR)
+    
+    return Response({
+        "status": "healthy", 
+        "rag_system": rag_status,
+        "api_key": api_key_info,
+        "model": MODEL,
+        "files": {
+            "csv_exists": csv_exists,
+            "csv_path": CSV_PATH,
+            "persist_dir_exists": persist_exists,
+            "persist_dir": PERSIST_DIR
         }
-        
-        api_key_info = {
-            "available": bool(API_KEY),
-            "length": len(API_KEY) if API_KEY else 0,
-            "starts_with": API_KEY[:10] + "..." if API_KEY else "N/A"
-        }
-        
-        # Check file existence
-        csv_exists = os.path.exists(CSV_PATH)
-        persist_exists = os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR)
-        
-        health_data = {
-            "status": "healthy" if all([gemini_test, rag_test, langgraph_test]) else "degraded",
-            "systems": systems_status,
-            "api_key": api_key_info,
-            "model": MODEL_NAME,
-            "files": {
-                "csv_exists": csv_exists,
-                "csv_path": CSV_PATH,
-                "persist_dir_exists": persist_exists,
-                "persist_dir": PERSIST_DIR
-            },
-            "timestamp": timezone.now().isoformat()
-        }
-        
-        return Response(health_data)
-        
-    except Exception as e:
-        logger.error(f"Health check error: {e}")
-        return Response({
-            "status": "error",
-            "message": f"Health check failed: {str(e)}"
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+    })
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def debug_rag_status(request):
@@ -1893,7 +963,7 @@ def debug_rag_status(request):
             "vectorstore_exists": os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR),
             "csv_path": CSV_PATH,
             "persist_dir": PERSIST_DIR,
-            "model": MODEL_NAME
+            "model": MODEL
         }
         
         # Test retriever if available
@@ -1915,8 +985,10 @@ def debug_rag_status(request):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+# ===== ENDPOINT RELOAD RAG SYSTEM =====
+
 @api_view(['POST'])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated])
 def reload_rag_system(request):
     """Endpoint to reload RAG system"""
     try:
@@ -1941,36 +1013,152 @@ def reload_rag_system(request):
             "message": f"Error reloading RAG system: {str(e)}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+# ===== ENDPOINT FORCE RELOAD (ALIAS) =====
+
 @api_view(['POST'])
-@permission_classes([AllowAny])
+@permission_classes([IsAuthenticated])
 def force_rag_reload(request):
     """Alias for reload_rag_system for backward compatibility"""
     return reload_rag_system(request)
 
+
 @api_view(['POST'])
-@permission_classes([AllowAny])
-def reload_all_systems(request):
-    """Reload semua sistem sekaligus"""
+@permission_classes([IsAuthenticated])
+def force_rag_reload(request):
+    """Force reload RAG system (admin only)"""
     try:
-        status_report = initialize_all_systems()
+        global retriever
+        retriever = initialize_rag_system()
         
-        success_count = sum(1 for status in status_report.values() if "Ready" in status)
-        total_systems = len(status_report)
+        if retriever:
+            return Response({
+                "status": "success", 
+                "message": "RAG system reloaded successfully"
+            })
+        else:
+            return Response({
+                "status": "error", 
+                "message": "Failed to reload RAG system"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+    except Exception as e:
+        logger.error(f"Error reloading RAG system: {e}")
+        return Response({
+            "status": "error", 
+            "message": f"Error reloading RAG system: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# ===== VIEWS KETIGA (CHATBOT ACTIVITY SYSTEM - PERBAIKAN) =====
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def start_chat_session(request):
+    """Memulai sesi chat baru untuk kegiatan pembelajaran - FIXED"""
+    try:
+        session_id = request.data.get('session_id', f"session_{timezone.now().strftime('%Y%m%d_%H%M%S')}")
+        
+        session, created = ChatSession.objects.get_or_create(
+            user=request.user,
+            session_id=session_id,
+            defaults={
+                'current_step': 'intro',
+                'status': 'active'
+            }
+        )
+        
+        # Jika session baru, buat pesan intro
+        if created:
+            intro_data = CHATBOT_FLOW['intro']
+            ChatMessage.objects.create(
+                session=session,
+                message_type='bot',
+                character=intro_data.get('character', 'Aquano'),
+                message_text=intro_data.get('message', ''),
+                message_data={
+                    'title': intro_data.get('title'),
+                    'image_url': intro_data.get('image_url'),
+                    'image_source': intro_data.get('image_source'),
+                    'question': intro_data.get('question'),
+                    'next_keywords': intro_data.get('next_keywords', [])
+                },
+                step_id=intro_data.get('id', 'intro')
+            )
+            
+            # Buat user progress
+            UserProgress.objects.create(
+                user=request.user,
+                session=session,
+                current_kegiatan='intro',
+                total_answers=0,
+            )
         
         return Response({
-            "status": "success",
-            "message": f"Reloaded {success_count}/{total_systems} systems",
-            "systems_status": status_report
+            'status': 'success',
+            'session_id': session.session_id,
+            'current_activity': session.current_step,
+            'message': 'Sesi chat berhasil dimulai'
         })
         
     except Exception as e:
-        logger.error(f"Error reloading all systems: {e}")
+        logger.error(f"Error starting chat session: {e}")
         return Response({
-            "status": "error",
-            "message": f"Error reloading systems: {str(e)}"
+            'status': 'error',
+            'message': 'Gagal memulai sesi chat'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-# ===== ACTIVITY HISTORY ENDPOINTS =====
+        
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def send_chat_message(request):
+    """Mengirim pesan dan mendapatkan respons bot dalam kegiatan pembelajaran"""
+    try:
+        session_id = request.data.get('session_id')
+        message_type = request.data.get('message_type')
+        character = request.data.get('character')
+        message_text = request.data.get('message_text')
+        step_id = request.data.get('step_id')
+        message_data = request.data.get('message_data', {})
+        
+        if not all([session_id, message_type, message_text, step_id]):
+            return Response({
+                'status': 'error',
+                'message': 'Data tidak lengkap'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Dapatkan session
+        try:
+            session = ChatSession.objects.get(session_id=session_id, user=request.user)
+        except ChatSession.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'message': 'Sesi tidak ditemukan'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Simpan pesan
+        message = ChatMessage.objects.create(
+            session=session,
+            message_type=message_type,
+            character=character,
+            message_text=message_text,
+            message_data=message_data,
+            step_id=step_id
+        )
+        
+        # Update session current step
+        session.current_step = step_id
+        session.save()
+        
+        return Response({
+            'status': 'success',
+            'message_id': message.id,
+            'timestamp': message.timestamp
+        })
+        
+    except Exception as e:
+        logger.error(f"Error sending chat message: {e}")
+        return Response({
+            'status': 'error',
+            'message': 'Gagal mengirim pesan'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -2060,3 +1248,934 @@ def get_session_overview(request, session_id):
             'status': 'error',
             'message': 'Sesi tidak ditemukan'
         }, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def submit_activity_answer(request):
+    """Menyimpan jawaban user untuk activity tertentu - FIXED VERSION"""
+    try:
+        print("=== DEBUG: submit_activity_answer CALLED ===")
+        print("Request data:", request.data)
+        print("User:", request.user.username)
+        
+        # Extract data dengan fallback yang lebih baik
+        session_id = request.data.get('session_id')
+        step_id = request.data.get('step_id') or request.data.get('activity_id')
+        question_data = request.data.get('question_data', {})
+        answer_text = request.data.get('answer_text', '')
+        answer_type = request.data.get('answer_type', 'essay')
+        
+        # Debug detail
+        print(f"Session ID: {session_id}")
+        print(f"Step ID: {step_id}")
+        print(f"Question Data: {question_data}")
+        print(f"Answer Text length: {len(answer_text)}")
+        print(f"Answer Type: {answer_type}")
+        
+        # Validasi data yang lebih fleksibel
+        if not session_id:
+            logger.error("Missing session_id")
+            return Response({
+                'status': 'error',
+                'message': 'Session ID diperlukan'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not step_id:
+            logger.error("Missing step_id")
+            return Response({
+                'status': 'error',
+                'message': 'Step ID diperlukan'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Dapatkan session
+        try:
+            session = ChatSession.objects.get(session_id=session_id, user=request.user)
+            print(f"Session found: {session.session_id}")
+        except ChatSession.DoesNotExist:
+            logger.error(f"Session not found: {session_id} for user {request.user.username}")
+            return Response({
+                'status': 'error',
+                'message': 'Sesi tidak ditemukan'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Extract question data dengan fallback yang lebih robust
+        if isinstance(question_data, str):
+            try:
+                question_data = json.loads(question_data)
+            except:
+                question_data = {}
+        
+        question_id = question_data.get('id') or f"question_{int(timezone.now().timestamp())}"
+        storage_key = question_data.get('storage_key') or f"storage_{question_id}"
+        question_text = question_data.get('text') or question_data.get('question_text') or 'Pertanyaan tidak tersedia'
+        
+        print(f"Processed question data:")
+        print(f"  Question ID: {question_id}")
+        print(f"  Storage Key: {storage_key}")
+        print(f"  Question Text: {question_text[:100]}...")
+        
+        # Cek apakah jawaban sudah ada
+        existing_answer = UserAnswer.objects.filter(
+            session=session,
+            question_id=question_id
+        ).first()
+        
+        if existing_answer:
+            # Update existing answer
+            print(f"Updating existing answer: {existing_answer.id}")
+            existing_answer.answer_text = answer_text
+            existing_answer.answer_type = answer_type
+            existing_answer.question_text = question_text
+            existing_answer.step_id = step_id
+            existing_answer.activity_id = step_id  # Untuk kompatibilitas
+            existing_answer.is_submitted = True
+            existing_answer.submitted_at = timezone.now()
+            existing_answer.save()
+            
+            answer = existing_answer
+            action = 'updated'
+        else:
+            # Buat jawaban baru
+            print("Creating new answer")
+            answer = UserAnswer.objects.create(
+                session=session,
+                question_id=question_id,
+                storage_key=storage_key,
+                answer_text=answer_text,
+                answer_type=answer_type,
+                question_text=question_text,
+                step_id=step_id,
+                activity_id=step_id,  # Untuk kompatibilitas
+                is_submitted=True,
+                submitted_at=timezone.now()
+            )
+            action = 'created'
+        
+        print(f"Answer {action} successfully: {answer.id}")
+        
+        # Update user progress
+        user_progress, created = UserProgress.objects.get_or_create(
+            user=request.user,
+            session=session,
+            defaults={
+                'current_kegiatan': step_id,
+                'total_answers': 1,
+            }
+        )
+        
+        if not created:
+            # Hitung total answers yang submitted
+            total_submitted = UserAnswer.objects.filter(
+                session=session, 
+                is_submitted=True
+            ).count()
+            
+            user_progress.total_answers = total_submitted
+            user_progress.current_kegiatan = step_id
+            user_progress.save()
+        
+        print(f"User progress updated: {user_progress.total_answers} answers")
+        
+        # Update activity progress
+        activity_progress, created = ActivityProgress.objects.get_or_create(
+            session=session,
+            activity_id=step_id,
+            defaults={
+                'status': 'completed',
+                'completed_at': timezone.now()
+            }
+        )
+        
+        if not created:
+            activity_progress.status = 'completed'
+            activity_progress.completed_at = timezone.now()
+            activity_progress.save()
+        
+        print(f"Activity progress updated: {step_id}")
+        
+        # Serialize response
+        answer_data = {
+            'id': answer.id,
+            'question_id': answer.question_id,
+            'answer_text': answer.answer_text,
+            'answer_type': answer.answer_type,
+            'question_text': answer.question_text,
+            'step_id': answer.step_id,
+            'activity_id': answer.activity_id,
+            'is_submitted': answer.is_submitted,
+            'submitted_at': answer.submitted_at.isoformat() if answer.submitted_at else None,
+            'created_at': answer.created_at.isoformat(),
+        }
+        
+        # Hitung completed activities
+        completed_activities_count = ActivityProgress.objects.filter(
+            session=session,
+            status='completed'
+        ).count()
+        
+        response_data = {
+            'status': 'success',
+            'message': 'Jawaban berhasil disimpan',
+            'action': action,
+            'answer_id': answer.id,
+            'answer': answer_data,
+            'progress': {
+                'total_answers': user_progress.total_answers,
+                'current_step': user_progress.current_kegiatan,
+                'completed_activities_count': completed_activities_count
+            }
+        }
+        
+        print("=== DEBUG: Response data ===")
+        print(response_data)
+        
+        return Response(response_data)
+        
+    except Exception as e:
+        logger.error(f"Error submitting activity answer: {str(e)}", exc_info=True)
+        import traceback
+        error_trace = traceback.format_exc()
+        print("FULL ERROR TRACEBACK:")
+        print(error_trace)
+        
+        return Response({
+            'status': 'error',
+            'message': f'Gagal menyimpan jawaban: {str(e)}',
+            'debug_info': {
+                'error_type': type(e).__name__,
+                'user': request.user.username if request.user else 'Anonymous'
+            }
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)               
+        
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def complete_activity(request):
+    """Menandai activity sebagai selesai - FIXED"""
+    try:
+        session_id = request.data.get('session_id')
+        step_id = request.data.get('step_id')  # ⭐⭐ GUNAKAN step_id ⭐⭐
+        
+        if not session_id or not step_id:
+            return Response({
+                'status': 'error',
+                'message': 'Session ID dan Step ID diperlukan'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Dapatkan session
+        try:
+            session = ChatSession.objects.get(session_id=session_id, user=request.user)
+        except ChatSession.DoesNotExist:
+            return Response({
+                'status': 'error',
+                'message': 'Sesi tidak ditemukan'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Tandai activity sebagai selesai
+        activity_progress, created = ActivityProgress.objects.get_or_create(
+            session=session,
+            activity_id=step_id,  # ⭐⭐ GUNAKAN step_id ⭐⭐
+            defaults={
+                'status': 'completed',
+                'completed_at': timezone.now()
+            }
+        )
+        
+        if not created:
+            activity_progress.status = 'completed'
+            activity_progress.completed_at = timezone.now()
+            activity_progress.save()
+        
+        return Response({
+            'status': 'success',
+            'message': f'Step {step_id} berhasil diselesaikan'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error completing activity: {e}")
+        return Response({
+            'status': 'error',
+            'message': 'Gagal menandai activity sebagai selesai'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)        
+
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+from django.db.models import Q
+
+def _int_or_default(value, default):
+    """Helper function to safely parse integer"""
+    try:
+        return int(value) if value else default
+    except (ValueError, TypeError):
+        return default
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def teacher_answers(request):
+    """
+    GET /api/teacher/answers/
+    """
+    try:
+        # PERBAIKAN: Gunakan step_id sebagai activity_id
+        qs = UserAnswer.objects.select_related("session__user").exclude(
+            session__isnull=True
+        ).exclude(
+            session__user__isnull=True
+        )
+
+        q = request.GET.get("q", "").strip()
+        activity = request.GET.get("activity", "").strip()  # Ini mencari di step_id
+        answer_type = request.GET.get("answer_type", "").strip()
+        date_from = request.GET.get("date_from", "").strip()
+        date_to = request.GET.get("date_to", "").strip()
+        ordering = request.GET.get("ordering", "-created_at")
+
+        # Search filter
+        if q:
+            qs = qs.filter(
+                Q(session__user__username__icontains=q) |
+                Q(answer_text__icontains=q) |
+                Q(question_text__icontains=q)
+            )
+        
+        # Activity filter - CARI DI step_id (karena activity_id disimpan sebagai step_id)
+        if activity:
+            qs = qs.filter(step_id__icontains=activity)
+        
+        # Answer type filter
+        if answer_type:
+            qs = qs.filter(answer_type=answer_type)
+        
+        # Date range filter
+        if date_from:
+            try:
+                qs = qs.filter(created_at__date__gte=date_from)
+            except Exception as e:
+                print(f"Invalid date_from format: {e}")
+        
+        if date_to:
+            try:
+                qs = qs.filter(created_at__date__lte=date_to)
+            except Exception as e:
+                print(f"Invalid date_to format: {e}")
+
+        # Ordering validation
+        allowed_orderings = ['created_at', '-created_at', 'updated_at', '-updated_at']
+        if ordering not in allowed_orderings:
+            ordering = '-created_at'
+        qs = qs.order_by(ordering)
+
+        # Pagination
+        page = int(request.GET.get("page", 1))
+        page_size = int(request.GET.get("page_size", 25))
+        page_size = min(page_size, 100)
+        
+        paginator = Paginator(qs, page_size)
+        
+        try:
+            page_obj = paginator.get_page(page)
+        except Exception as e:
+            return Response(
+                {"error": f"Pagination error: {str(e)}"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Build response data
+        data = []
+        start_no = (page_obj.number - 1) * page_size + 1
+        
+        for idx, answer in enumerate(page_obj.object_list, start=start_no):
+            try:
+                username = answer.session.user.username if (answer.session and answer.session.user) else "Unknown"
+            except:
+                username = "Unknown"
+            
+            # ⭐⭐ GUNAKAN step_id SEBAGAI activity_id ⭐⭐
+            activity_name = answer.step_id or "-"
+            
+            try:
+                tanggal = answer.created_at.strftime("%Y-%m-%d %H:%M") if answer.created_at else "-"
+            except:
+                tanggal = "-"
+            
+            data.append({
+                "no": idx,
+                "id": answer.id,
+                "nama_siswa": username,
+                "kegiatan": activity_name,  # ⭐⭐ step_id sebagai kegiatan ⭐⭐
+                "jenis_pertanyaan": answer.answer_type or "essay",
+                "pertanyaan": answer.question_text or "-",
+                "jawaban_siswa": answer.answer_text or "-",
+                "image_url": answer.image_url or None,
+                "tipe_jawaban": answer.answer_type or "essay",
+                "status": "Submitted" if answer.is_submitted else "Draft",
+                "tanggal_dikirim": tanggal,
+            })
+
+        # Metadata
+        meta = {
+            "page": page_obj.number,
+            "page_size": page_size,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
+        }
+        
+        return Response({
+            "meta": meta, 
+            "results": data
+        }, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print("ERROR in teacher_answers:")
+        print(str(e))
+        print(error_trace)
+        
+        return Response(
+            {
+                "error": str(e), 
+                "detail": "Internal server error",
+            }, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(["GET"])
+def teacher_dashboard(request):
+    try:
+        users = User.objects.all()
+
+        username = request.GET.get("username")
+        if username:
+            users = users.filter(username__icontains=username)
+
+        data_list = []
+        for user in users:
+            try:
+                session = ChatSession.objects.filter(user=user).order_by("-updated_at").first()
+                progress = UserProgress.objects.filter(user=user).first()
+                last_activity_progress = ActivityProgress.objects.filter(session__user=user).order_by("-updated_at").first()
+                total_answers = UserAnswer.objects.filter(session__user=user).count()
+
+                data_list.append({
+                    "siswa": user.username,
+                    "komik": last_activity_progress.activity_id if last_activity_progress else "-",
+                    "halaman_terakhir": progress.current_kegiatan if progress else "-",
+                    "status_komik": "Selesai" if (last_activity_progress and last_activity_progress.status == "completed") else "Belum",
+                    "chat_status": session.status if session else "-",
+                    "kegiatan": last_activity_progress.activity_id if last_activity_progress else "-",
+                    "jawaban_terkumpul": total_answers,
+                })
+            except Exception as e:
+                print(f"Error processing user {user.username}: {str(e)}")
+                continue
+
+        # Filter after building data
+        komik = request.GET.get("komik")
+        status_komik = request.GET.get("status_komik")
+        chat_status = request.GET.get("chat_status")
+        
+        if komik:
+            data_list = [d for d in data_list if komik.lower() in d['komik'].lower()]
+        if status_komik:
+            data_list = [d for d in data_list if d['status_komik'].lower() == status_komik.lower()]
+        if chat_status:
+            data_list = [d for d in data_list if str(d['chat_status']).lower() == chat_status.lower()]
+
+        # Pagination
+        page = int(request.GET.get("page", 1))
+        page_size = int(request.GET.get("page_size", 25))
+        paginator = Paginator(data_list, page_size)
+        
+        page_obj = paginator.get_page(page)
+
+        meta = {
+            "page": page_obj.number,
+            "page_size": page_size,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+        }
+        return Response({"meta": meta, "results": list(page_obj)}, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        import traceback
+        print("ERROR in teacher_dashboard:", str(e))
+        print(traceback.format_exc())
+        return Response(
+            {"error": str(e), "detail": "Internal server error"}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )# ===== PERBAIKAN UNTUK TEACHER FUNCTIONS =====
+
+from django.core.paginator import Paginator
+from django.db.models import Q, Count, Max
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
+from rest_framework.response import Response
+from rest_framework import status
+
+@api_view(["GET"])
+@permission_classes([AllowAny])  # Atau gunakan custom permission
+def teacher_answers(request):
+    """
+    GET /api/teacher/answers/
+    
+    Query params:
+    - q: search username/answer/question
+    - activity: filter by activity_id
+    - answer_type: filter by answer type
+    - date_from: filter by date (YYYY-MM-DD)
+    - date_to: filter by date (YYYY-MM-DD)
+    - ordering: created_at atau -created_at
+    - page: page number
+    - page_size: items per page
+    """
+    try:
+        # PERBAIKAN 1: Tambahkan filter untuk memastikan data valid
+        qs = UserAnswer.objects.select_related(
+            "session__user"
+        ).exclude(
+            session__isnull=True
+        ).exclude(
+            session__user__isnull=True
+        )
+
+        # Filter berdasarkan query params
+        q = request.GET.get("q", "").strip()
+        activity = request.GET.get("activity", "").strip()
+        answer_type = request.GET.get("answer_type", "").strip()
+        date_from = request.GET.get("date_from", "").strip()
+        date_to = request.GET.get("date_to", "").strip()
+        ordering = request.GET.get("ordering", "-created_at")
+
+        # Search filter
+        if q:
+            qs = qs.filter(
+                Q(session__user__username__icontains=q) |
+                Q(answer_text__icontains=q) |
+                Q(question_text__icontains=q)
+            )
+        
+        # Activity filter - PERBAIKAN 2: Handle NULL activity_id
+        if activity:
+            qs = qs.filter(activity_id__icontains=activity)
+        
+        # Answer type filter
+        if answer_type:
+            qs = qs.filter(answer_type=answer_type)
+        
+        # Date range filter
+        if date_from:
+            try:
+                qs = qs.filter(created_at__date__gte=date_from)
+            except Exception as e:
+                print(f"Invalid date_from format: {e}")
+        
+        if date_to:
+            try:
+                qs = qs.filter(created_at__date__lte=date_to)
+            except Exception as e:
+                print(f"Invalid date_to format: {e}")
+
+        # Ordering validation
+        allowed_orderings = ['created_at', '-created_at', 'updated_at', '-updated_at']
+        if ordering not in allowed_orderings:
+            ordering = '-created_at'
+        qs = qs.order_by(ordering)
+
+        # Pagination
+        page = int(request.GET.get("page", 1))
+        page_size = int(request.GET.get("page_size", 25))
+        
+        # Batasi page_size maksimal
+        page_size = min(page_size, 100)
+        
+        paginator = Paginator(qs, page_size)
+        
+        try:
+            page_obj = paginator.get_page(page)
+        except Exception as e:
+            return Response(
+                {"error": f"Pagination error: {str(e)}"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Build response data - PERBAIKAN 3: Handle missing data gracefully
+        data = []
+        start_no = (page_obj.number - 1) * page_size + 1
+        
+        for idx, answer in enumerate(page_obj.object_list, start=start_no):
+            # Safe data extraction
+            try:
+                username = answer.session.user.username if (answer.session and answer.session.user) else "Unknown"
+            except:
+                username = "Unknown"
+            
+            # PERBAIKAN 4: Gunakan step_id jika activity_id kosong
+            activity_name = answer.activity_id or answer.step_id or "-"
+            
+            # Format tanggal dengan fallback
+            try:
+                tanggal = answer.created_at.strftime("%Y-%m-%d %H:%M") if answer.created_at else "-"
+            except:
+                tanggal = "-"
+            
+            data.append({
+                "no": idx,
+                "id": answer.id,  # Tambahkan ID untuk referensi
+                "nama_siswa": username,
+                "kegiatan": activity_name,
+                "jenis_pertanyaan": answer.answer_type or "essay",
+                "pertanyaan": answer.question_text or "-",
+                "jawaban_siswa": answer.answer_text or "-",
+                "image_url": answer.image_url or None,  # Untuk jawaban yang ada gambar
+                "tipe_jawaban": answer.answer_type or "essay",
+                "status": "Submitted" if answer.is_submitted else "Draft",
+                "tanggal_dikirim": tanggal,
+            })
+
+        # Metadata
+        meta = {
+            "page": page_obj.number,
+            "page_size": page_size,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
+        }
+        
+        return Response({
+            "meta": meta, 
+            "results": data
+        }, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print("=" * 50)
+        print("ERROR in teacher_answers:")
+        print(str(e))
+        print(error_trace)
+        print("=" * 50)
+        
+        return Response(
+            {
+                "error": str(e), 
+                "detail": "Internal server error",
+                "trace": error_trace if request.GET.get('debug') else None
+            }, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def teacher_dashboard(request):
+    """
+    GET /api/teacher/dashboard/ - FIXED VERSION
+    """
+    try:
+        # Get all users
+        users = User.objects.all().order_by('username')
+
+        # Filter by username
+        username_filter = request.GET.get("username", "").strip()
+        if username_filter:
+            users = users.filter(username__icontains=username_filter)
+
+        data_list = []
+        
+        for user in users:
+            try:
+                # Dapatkan data comic progress
+                comic_progress = UserComicProgress.objects.filter(
+                    user=user
+                ).order_by('-updated_at').first()
+                
+                # Dapatkan chat session
+                chat_session = ChatSession.objects.filter(
+                    user=user
+                ).order_by('-updated_at').first()
+                
+                # Dapatkan user progress
+                user_progress = UserProgress.objects.filter(
+                    user=user
+                ).order_by('-updated_at').first()
+                
+                # Dapatkan activity progress terakhir
+                last_activity = ActivityProgress.objects.filter(
+                    session__user=user
+                ).order_by('-last_accessed').first()
+                
+                # Hitung total jawaban
+                total_answers = UserAnswer.objects.filter(
+                    session__user=user,
+                    is_submitted=True
+                ).count()
+                
+                # Data Komik
+                if comic_progress:
+                    comic_name = f"{comic_progress.comic_slug} - {comic_progress.episode_slug}"
+                    last_page = comic_progress.last_page
+                    comic_status = "Selesai" if comic_progress.finish else "Belum Selesai"
+                else:
+                    comic_name = "-"
+                    last_page = 0
+                    comic_status = "Belum Mulai"
+                
+                # Data Chat/Kegiatan
+                if chat_session:
+                    chat_status_value = chat_session.status
+                    current_step = chat_session.current_step
+                else:
+                    chat_status_value = "not_started"
+                    current_step = "-"
+                
+                # Kegiatan terakhir
+                if last_activity:
+                    last_kegiatan = last_activity.activity_id
+                    kegiatan_status = last_activity.status
+                elif user_progress:
+                    last_kegiatan = user_progress.current_kegiatan
+                    kegiatan_status = "in_progress"
+                else:
+                    last_kegiatan = "-"
+                    kegiatan_status = "not_started"
+                
+                # PERBAIKAN: Hapus completed_activities dari response
+                data_list.append({
+                    "siswa": user.username,
+                    "user_id": user.id,
+                    
+                    # Data Komik
+                    "komik": comic_name,
+                    "halaman_terakhir": last_page,
+                    "status_komik": comic_status,
+                    
+                    # Data Kegiatan Pembelajaran
+                    "chat_status": chat_status_value,
+                    "current_step": current_step,
+                    "kegiatan_terakhir": last_kegiatan,
+                    "status_kegiatan": kegiatan_status,
+                    
+                    # Statistik
+                    "jawaban_terkumpul": total_answers,
+                    
+                    # Timestamp
+                    "terakhir_aktif": (
+                        chat_session.updated_at.strftime("%Y-%m-%d %H:%M")
+                        if chat_session and chat_session.updated_at
+                        else "-"
+                    )
+                })
+                
+            except Exception as e:
+                print(f"Error processing user {user.username}: {str(e)}")
+                continue
+
+        # Filter setelah data terbentuk
+        komik_filter = request.GET.get("komik", "").strip()
+        status_komik_filter = request.GET.get("status_komik", "").strip()
+        chat_status_filter = request.GET.get("chat_status", "").strip()
+        
+        if komik_filter:
+            data_list = [
+                d for d in data_list 
+                if komik_filter.lower() in d['komik'].lower()
+            ]
+        
+        if status_komik_filter:
+            data_list = [
+                d for d in data_list 
+                if d['status_komik'].lower() == status_komik_filter.lower()
+            ]
+        
+        if chat_status_filter:
+            data_list = [
+                d for d in data_list 
+                if str(d['chat_status']).lower() == chat_status_filter.lower()
+            ]
+
+        # Pagination
+        page = int(request.GET.get("page", 1))
+        page_size = int(request.GET.get("page_size", 25))
+        page_size = min(page_size, 100)
+        
+        paginator = Paginator(data_list, page_size)
+        page_obj = paginator.get_page(page)
+
+        # Metadata
+        meta = {
+            "page": page_obj.number,
+            "page_size": page_size,
+            "total_pages": paginator.num_pages,
+            "total_items": paginator.count,
+            "has_next": page_obj.has_next(),
+            "has_previous": page_obj.has_previous(),
+        }
+        
+        return Response({
+            "meta": meta, 
+            "results": list(page_obj)
+        }, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print("ERROR in teacher_dashboard:")
+        print(str(e))
+        
+        return Response(
+            {
+                "error": str(e), 
+                "detail": "Internal server error",
+            }, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+        
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def teacher_student_detail(request, username):
+    """
+    GET /api/teacher/student/<username>/
+    
+    Mendapatkan detail lengkap progress seorang siswa
+    """
+    try:
+        user = User.objects.get(username=username)
+        
+        # Comic Progress
+        comic_progress_list = UserComicProgress.objects.filter(
+            user=user
+        ).order_by('-updated_at')
+        
+        comics_data = [{
+            "comic_slug": cp.comic_slug,
+            "episode_slug": cp.episode_slug,
+            "last_page": cp.last_page,
+            "finish": cp.finish,
+            "updated_at": cp.updated_at.strftime("%Y-%m-%d %H:%M")
+        } for cp in comic_progress_list]
+        
+        # Chat Sessions
+        chat_sessions = ChatSession.objects.filter(
+            user=user
+        ).order_by('-updated_at')
+        
+        sessions_data = [{
+            "session_id": cs.session_id,
+            "current_step": cs.current_step,
+            "status": cs.status,
+            "created_at": cs.created_at.strftime("%Y-%m-%d %H:%M"),
+            "updated_at": cs.updated_at.strftime("%Y-%m-%d %H:%M")
+        } for cs in chat_sessions]
+        
+        # Activity Progress
+        activity_progress_list = ActivityProgress.objects.filter(
+            session__user=user
+        ).order_by('activity_id')
+        
+        activities_data = [{
+            "activity_id": ap.activity_id,
+            "status": ap.status,
+            "last_accessed": ap.last_accessed.strftime("%Y-%m-%d %H:%M"),
+            "completed_at": ap.completed_at.strftime("%Y-%m-%d %H:%M") if ap.completed_at else None
+        } for ap in activity_progress_list]
+        
+        # Answers
+        total_answers = UserAnswer.objects.filter(
+            session__user=user,
+            is_submitted=True
+        ).count()
+        
+        # Statistics
+        answers_by_activity = UserAnswer.objects.filter(
+            session__user=user,
+            is_submitted=True
+        ).values('activity_id').annotate(
+            count=Count('id')
+        ).order_by('activity_id')
+        
+        return Response({
+            "username": username,
+            "user_id": user.id,
+            "comics": comics_data,
+            "chat_sessions": sessions_data,
+            "activities": activities_data,
+            "statistics": {
+                "total_answers": total_answers,
+                "answers_by_activity": list(answers_by_activity)
+            }
+        }, status=status.HTTP_200_OK)
+        
+    except User.DoesNotExist:
+        return Response(
+            {"error": "User tidak ditemukan"}, 
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        import traceback
+        print(f"Error in teacher_student_detail: {str(e)}")
+        print(traceback.format_exc())
+        return Response(
+            {"error": str(e)}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    
+
+# Load environment variables
+load_dotenv()
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_teacher_password(request):
+    """
+    POST /api/teacher/verify-password/
+    Body: { "password": "your_password" }
+    
+    Verifikasi password guru dari .env file
+    """
+    try:
+        input_password = request.data.get('password', '')
+        
+        # Ambil password dari .env
+        correct_password = os.getenv('TEACHER_PASSWORD', 'greenverse2024')
+        
+        if not input_password:
+            return Response(
+                {
+                    'success': False,
+                    'message': 'Password tidak boleh kosong'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verifikasi password
+        if input_password == correct_password:
+            return Response(
+                {
+                    'success': True,
+                    'message': 'Password benar'
+                },
+                status=status.HTTP_200_OK
+            )
+        else:
+            return Response(
+                {
+                    'success': False,
+                    'message': 'Password salah'
+                },
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+            
+    except Exception as e:
+        print(f"Error in verify_teacher_password: {str(e)}")
+        return Response(
+            {
+                'success': False,
+                'message': 'Terjadi kesalahan server'
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
