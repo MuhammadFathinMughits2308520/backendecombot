@@ -30,6 +30,10 @@ urlpatterns = [
     # Activity Management
     path('chat/answer/submit/', views.submit_activity_answer, name='submit_activity_answer'),
     path('chat/activity/complete/', views.complete_activity, name='complete_activity'),
+    path('chat/flow/', views.get_chat_flow, name='get_chat_flow'),
+    path('chat/session/<str:session_id>/overview/', views.get_session_overview, name='get_session_overview'),
+    path('chat/session/<str:session_id>/activity/<str:activity_id>/', views.get_activity_history, name='get_activity_history'),
+
     
     # ===== DEBUG & HEALTH ENDPOINTS =====
     

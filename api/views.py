@@ -2179,3 +2179,102 @@ def verify_teacher_password(request):
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+        
+import json
+import os
+from django.http import JsonResponse
+from django.conf import settings
+
+def get_chat_flow(request):
+    """Mengembalikan chat flow configuration"""
+    try:
+        # Coba load dari database terlebih dahulu
+        from .models import ChatFlowConfig
+        active_flow = ChatFlowConfig.objects.filter(is_active=True).first()
+        
+        if active_flow:
+            return JsonResponse(active_flow.flow_data)
+        
+        # Fallback ke file JSON
+        chat_file_path = os.path.join(settings.BASE_DIR, 'data', 'chat.json')
+        with open(chat_file_path, 'r', encoding='utf-8') as file:
+            chat_data = json.load(file)
+        
+        return JsonResponse(chat_data)
+        
+    except Exception as e:
+        return JsonResponse(
+            {'error': f'Failed to load chat flow: {str(e)}'}, 
+            status=500
+        )
+
+def get_session_overview(request, session_id):
+    """Mengembalikan overview session"""
+    try:
+        from .models import ChatSession, ActivityProgress
+        
+        session = ChatSession.objects.get(session_id=session_id)
+        
+        # Get completed activities
+        completed_activities = ActivityProgress.objects.filter(
+            session=session, 
+            status='completed'
+        ).values_list('activity_id', flat=True)
+        
+        # Get visited activities (all activities that have progress)
+        visited_activities = ActivityProgress.objects.filter(
+            session=session
+        ).values_list('activity_id', flat=True)
+        
+        return JsonResponse({
+            'current_step': session.current_step,
+            'completed_activities': list(completed_activities),
+            'visited_activities': list(visited_activities),
+            'session_status': session.status
+        })
+        
+    except ChatSession.DoesNotExist:
+        return JsonResponse({'error': 'Session not found'}, status=404)
+    except Exception as e:
+        return JsonResponse(
+            {'error': f'Failed to get session overview: {str(e)}'}, 
+            status=500
+        )
+
+def get_activity_history(request, session_id, activity_id):
+    """Mengembalikan history pesan untuk activity tertentu"""
+    try:
+        from .models import ChatSession, ChatMessage
+        
+        session = ChatSession.objects.get(session_id=session_id)
+        messages = ChatMessage.objects.filter(
+            session=session,
+            activity_id=activity_id
+        ).order_by('timestamp', 'sequence_order')
+        
+        message_list = []
+        for msg in messages:
+            message_list.append({
+                'message_type': msg.message_type,
+                'message_text': msg.message_text,
+                'message_data': msg.message_data or {},
+                'timestamp': msg.timestamp.isoformat(),
+                'character': msg.character,
+                'step_id': msg.step_id
+            })
+        
+        return JsonResponse({
+            'history': {
+                'messages': message_list
+            }
+        })
+        
+    except ChatSession.DoesNotExist:
+        return JsonResponse({'error': 'Session not found'}, status=404)
+    except Exception as e:
+        return JsonResponse(
+            {'error': f'Failed to get activity history: {str(e)}'}, 
+            status=500
+        )
+        
+        
