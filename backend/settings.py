@@ -40,10 +40,10 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
 ]
 
-SIMPLE_JWT = {
-    'BLACKLIST_AFTER_ROTATION': True,
-    'ROTATE_REFRESH_TOKENS': True,
-}
+# SIMPLE_JWT = {
+#     'BLACKLIST_AFTER_ROTATION': True,
+#     'ROTATE_REFRESH_TOKENS': True,
+# }
 
 # ----------------------------------------------------
 # ⚙️ Middleware
@@ -96,16 +96,24 @@ DATABASES = {
 # ----------------------------------------------------
 # 🔑 Auth & JWT
 # ----------------------------------------------------
+# ----------------------------------------------------
+# 🔑 Auth & JWT
+# ----------------------------------------------------
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     )
 }
 
+# GABUNGKAN SEMUA PENGATURAN SIMPLE_JWT DI SINI
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'AUTH_HEADER_TYPES': ('Bearer',),
+    
+    # Pengaturan ini dari blok pertama Anda yang hilang
+    'BLACKLIST_AFTER_ROTATION': True,
+    'ROTATE_REFRESH_TOKENS': True,
 }
 
 # ----------------------------------------------------
