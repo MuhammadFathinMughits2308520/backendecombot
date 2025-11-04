@@ -24,13 +24,12 @@ urlpatterns = [
     # Chat Session Management
     path('chat/session/start/', views.start_chat_session, name='start_chat_session'),
     path('chat/session/send/', views.send_chat_message, name='send_chat_message'),
-    path('chat/session/<str:session_id>/activity/<str:activity_id>/', views.get_activity_history, name='get_activity_history'),
-    path('chat/session/<str:session_id>/overview/', views.get_session_overview, name='get_session_overview'),
     
     # Activity Management
     path('chat/answer/submit/', views.submit_activity_answer, name='submit_activity_answer'),
     path('chat/activity/complete/', views.complete_activity, name='complete_activity'),
-    # path('chat/flow/', views.get_chat_flow, name='get_chat_flow'),
+    
+    # Session History & Overview
     path('chat/session/<str:session_id>/overview/', views.get_session_overview, name='get_session_overview'),
     path('chat/session/<str:session_id>/activity/<str:activity_id>/', views.get_activity_history, name='get_activity_history'),
 
