@@ -15,10 +15,11 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.utils import timezone
 
-# Import untuk chatbot
+# ===== IMPORT UNTUK CHATBOT DENGAN LANGGRAPH =====
 import sys
 import os
 import pandas as pd
+import json
 import google.generativeai as genai
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -26,6 +27,17 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from dotenv import load_dotenv
 import logging
+
+# ===== LANGGRAPH & LANGCHAIN IMPORTS =====
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import trim_messages
+from typing import Sequence, Annotated, TypedDict
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -62,13 +74,15 @@ else:
     all_env_vars = {k: v for k, v in os.environ.items() if 'API' in k or 'KEY' in k}
     print(f"=== DEBUG: Available API/KEY env vars: {all_env_vars} ===")
 
-MODEL = "gemini-2.0-flash-lite"  
+MODEL_NAME = "gemini-2.0-flash-lite"  
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 TOP_K = 4
 
-# Global variable for retriever
+# Global variables
 retriever = None
+gemini_model = None
+chatbot_app = None
 
 # Data struktur chatbot dari file JSON Anda
 CHATBOT_FLOW = {
@@ -256,129 +270,190 @@ CHATBOT_FLOW = {
     }
 }
 
-# Navigation rules berdasarkan file JSON Anda
-NAVIGATION_RULES = {
-    "intro": {
-        "siap": "kimia_hijau"
-    },
-    "kimia_hijau": {
-        "sudah": "pre_kegiatan",
-        "forum diskusi": "forum_diskusi"
-    },
-    "pre_kegiatan": {
-        "mulai kegiatan 1": "kegiatan_1",
-        "kembali ke kimia hijau": "kimia_hijau",
-        "forum diskusi": "forum_diskusi"
-    },
-    "kegiatan_1": {
-        "pertanyaan": "kegiatan_1_question",
-        "mulai kegiatan 2": "kegiatan_2",
-        "kembali ke kegiatan 1": "kegiatan_1",
-        "forum diskusi": "forum_diskusi"
-    },
-    "kegiatan_2": {
-        "pertanyaan": "kegiatan_2_question",
-        "mulai kegiatan 3": "kegiatan_3",
-        "kembali ke kegiatan 2": "kegiatan_2",
-        "forum diskusi": "forum_diskusi"
-    },
-    "kegiatan_3": {
-        "pertanyaan": "kegiatan_3_question",
-        "mulai kegiatan 4": "kegiatan_4",
-        "kembali ke kegiatan 3": "kegiatan_3",
-        "forum diskusi": "forum_diskusi"
-    },
-    "kegiatan_4": {
-        "pertanyaan diskusi": "kegiatan_4_discussion",
-        "mulai kegiatan 5": "kegiatan_5",
-        "kembali ke kegiatan 4": "kegiatan_4",
-        "forum diskusi": "forum_diskusi"
-    },
-    "kegiatan_5": {
-        "pertanyaan tantangan": "kegiatan_5_challenge",
-        "mulai kegiatan 6": "kegiatan_6",
-        "kembali ke kegiatan 5": "kegiatan_5",
-        "forum diskusi": "forum_diskusi"
-    },
-    "kegiatan_6": {
-        "pertanyaan kreasi": "kegiatan_6_creative",
-        "mulai kegiatan 7": "kegiatan_7",
-        "kembali ke kegiatan 6": "kegiatan_6",
-        "forum diskusi": "forum_diskusi"
-    },
-    "kegiatan_7": {
-        "pertanyaan reflektif": "kegiatan_7_reflective",
-        "kembali ke kegiatan 6": "kegiatan_6",
-        "forum diskusi": "forum_diskusi",
-        "selesai": "completion"
-    },
-    "completion": {
-        "forum diskusi": "forum_diskusi",
-        "kembali ke menu": "intro"
-    },
-    "forum_diskusi": {
-        "kembali ke kimia hijau": "kimia_hijau",
-        "kembali ke kegiatan 1": "kegiatan_1",
-        "kembali ke kegiatan 2": "kegiatan_2",
-        "kembali ke kegiatan 3": "kegiatan_3",
-        "kembali ke kegiatan 4": "kegiatan_4",
-        "kembali ke kegiatan 5": "kegiatan_5",
-        "kembali ke kegiatan 6": "kegiatan_6",
-        "kembali ke kegiatan 7": "kegiatan_7",
-        "kembali ke kegiatan akhir": "completion"
-    }
-}
+# ===== INISIALISASI MODEL GEMINI =====
 
-# ===== FUNGSI RAG SYSTEM YANG DIPERBAIKI =====
+def initialize_gemini_model():
+    """Initialize Gemini model dengan error handling yang lebih baik"""
+    try:
+        if not API_KEY:
+            logger.error("❌ API key tidak ditemukan di environment variables")
+            logger.info("Pastikan GEMINI_API_KEY atau GOOGLE_API_KEY sudah di-set di .env file")
+            return None
+            
+        # Gunakan LangChain ChatGoogleGenerativeAI tanpa setting verbose global
+        model = ChatGoogleGenerativeAI(
+            model=MODEL_NAME,
+            google_api_key=API_KEY,
+            temperature=0.7,
+            max_tokens=1000,
+            timeout=30
+        )
+        
+        # Test the model dengan prompt sederhana
+        try:
+            test_response = model.invoke("Hello, test connection")
+            if test_response and hasattr(test_response, 'content'):
+                logger.info("✅ Gemini model initialized dan tested successfully")
+                return model
+            else:
+                logger.error("❌ Gemini model test failed - no response content")
+                return None
+        except Exception as test_error:
+            logger.error(f"❌ Gemini model test failed: {test_error}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Error initializing Gemini model: {e}")
+        return None    
+
+# ===== LANGGRAPH CHATBOT SYSTEM =====
+
+class ChatState(TypedDict):
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    session_id: str
+    user_id: str
+    current_activity: str
+
+def create_chatbot_graph():
+    """Membuat LangGraph chatbot dengan memory persistence"""
+    try:
+        # Define the graph
+        workflow = StateGraph(state_schema=ChatState)
+        
+        # Define prompt template dengan konteks pembelajaran
+        prompt_template = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                """Anda adalah Aquano, asisten virtual pembelajaran untuk Ecombot. Anda memiliki pengetahuan tentang:
+                
+                TOPIK UTAMA:
+                1. Kimia Hijau (Green Chemistry) dan 12 prinsipnya
+                2. Tradisi Mapag Hujan di Jawa Barat (Bandung dan Subang)
+                3. Filosofi Sunda seperti Seba Tangkal Muru Cai
+                4. Program Maraton Bebersih Walungan dan Susukan
+                5. Konservasi lingkungan dan mitigasi banjir
+                6. Pendidikan STEM (Science, Technology, Engineering, Arts, Mathematics)
+                
+                INSTRUKSI:
+                - Jawablah dengan bahasa Indonesia yang jelas dan mudah dipahami
+                - Bersikaplah ramah dan membantu seperti guru yang baik
+                - Jika informasi tidak cukup, gunakan pengetahuan umum Anda
+                - Fokus pada topik-topik utama di atas
+                - Bimbing siswa melalui proses pembelajaran yang interaktif
+                - Gunakan emoji sesekali untuk membuat percakapan lebih hidup
+                """
+            ),
+            MessagesPlaceholder(variable_name="messages"),
+        ])
+        
+        # Define the function that calls the model dengan RAG integration
+        def call_model_with_rag(state: ChatState):
+            """Memanggil model dengan konteks dari RAG system"""
+            try:
+                # Dapatkan pertanyaan terakhir dari user
+                last_user_message = None
+                for msg in reversed(state["messages"]):
+                    if isinstance(msg, HumanMessage):
+                        last_user_message = msg.content
+                        break
+                
+                # Jika ada RAG system, dapatkan konteks relevan
+                context = ""
+                if retriever and last_user_message:
+                    try:
+                        docs = retriever.get_relevant_documents(last_user_message)
+                        context = "\n\n".join([d.page_content for d in docs[:2]])  # Ambil 2 dokumen teratas
+                        logger.info(f"RAG retrieved {len(docs)} documents for question")
+                    except Exception as e:
+                        logger.error(f"Error retrieving RAG documents: {e}")
+                        context = "Informasi dari database sedang tidak tersedia."
+                
+                # Siapkan prompt dengan konteks
+                if context:
+                    enhanced_prompt = f"""
+KONTEKS TAMBAHAN:
+{context}
+
+PERTANYAAN USER:
+{last_user_message}
+
+JAWABAN (gunakan bahasa Indonesia yang jelas dan membantu):
+"""
+                    # Buat messages baru dengan konteks
+                    enhanced_messages = []
+                    for msg in state["messages"]:
+                        if isinstance(msg, HumanMessage) and msg.content == last_user_message:
+                            # Ganti pesan user dengan yang sudah diperkaya konteks
+                            enhanced_messages.append(HumanMessage(content=enhanced_prompt))
+                        else:
+                            enhanced_messages.append(msg)
+                    
+                    prompt = prompt_template.invoke({"messages": enhanced_messages})
+                else:
+                    prompt = prompt_template.invoke(state)
+                
+                # Panggil model
+                response = gemini_model.invoke(prompt)
+                
+                # Simpan interaksi ke database untuk analytics
+                try:
+                    session = ChatSession.objects.get(session_id=state["session_id"])
+                    ChatMessage.objects.create(
+                        session=session,
+                        message_type='bot',
+                        character='Aquano',
+                        message_text=response.content,
+                        step_id=state.get("current_activity", "general"),
+                        activity_id=state.get("current_activity", "general")
+                    )
+                except Exception as db_error:
+                    logger.error(f"Error saving chat message to DB: {db_error}")
+                
+                return {"messages": [response]}
+                
+            except Exception as e:
+                logger.error(f"Error in call_model_with_rag: {e}")
+                # Fallback response
+                fallback_response = AIMessage(
+                    content="Maaf, saya mengalami gangguan teknis. Silakan coba lagi atau hubungi administrator."
+                )
+                return {"messages": [fallback_response]}
+        
+        # Add nodes and edges
+        workflow.add_node("model", call_model_with_rag)
+        workflow.add_edge(START, "model")
+        
+        # Add memory persistence
+        memory = MemorySaver()
+        app = workflow.compile(checkpointer=memory)
+        
+        logger.info("✅ LangGraph chatbot system initialized successfully")
+        return app
+        
+    except Exception as e:
+        logger.error(f"Error creating LangGraph chatbot: {e}")
+        return None
+
+# ===== RAG SYSTEM YANG DIPERBAIKI =====
 
 def create_fallback_retriever():
-    """Create a fallback retriever with basic knowledge"""
+    """Create a fallback retriever tanpa sentence-transformers"""
     try:
-        logger.info("Creating fallback retriever...")
+        logger.info("Creating simple fallback retriever...")
+        
+        # Gunakan documents sederhana tanpa embeddings complex
         fallback_docs = [
             Document(
                 page_content="""
-                Topik: Kimia Hijau (Green Chemistry)
-                Pertanyaan: Apa itu Kimia Hijau?
-                Jawaban: Kimia Hijau adalah pendekatan dalam ilmu kimia yang bertujuan merancang produk dan proses kimia yang mengurangi atau menghilangkan penggunaan dan pembentukan zat berbahaya. Ada 12 prinsip kimia hijau yang meliputi pencegahan limbah, atom economy, desain bahan kimia yang lebih aman, dan penggunaan energi yang efisien.
-                Context: Pendidikan kimia berkelanjutan
-                Keywords: kimia hijau, green chemistry, lingkungan, berkelanjutan
-                Related topics: prinsip kimia hijau, lingkungan berkelanjutan
+                Kimia Hijau (Green Chemistry) adalah pendekatan dalam ilmu kimia yang bertujuan merancang produk dan proses kimia yang mengurangi atau menghilangkan penggunaan dan pembentukan zat berbahaya. Ada 12 prinsip kimia hijau yang meliputi pencegahan limbah, atom economy, desain bahan kimia yang lebih aman, dan penggunaan energi yang efisien.
                 """,
                 metadata={"topic": "Kimia Hijau", "category": "education"}
             ),
             Document(
                 page_content="""
-                Topik: Tradisi Mapag Hujan
-                Pertanyaan: Apa itu tradisi Mapag Hujan?
-                Jawaban: Mapag Hujan adalah tradisi masyarakat Jawa Barat khususnya di Bandung dan Subang yang bertujuan menyambut musim hujan dengan membersihkan lingkungan, sungai, dan saluran air. Tradisi ini merupakan bentuk kearifan lokal dalam mitigasi banjir dan pelestarian lingkungan.
-                Context: Kearifan lokal dan lingkungan
-                Keywords: mapag hujan, tradisi, jawa barat, lingkungan, banjir
-                Related topics: budaya lokal, konservasi air, mitigasi banjir
+                Tradisi Mapag Hujan adalah tradisi masyarakat Jawa Barat khususnya di Bandung dan Subang yang bertujuan menyambut musim hujan dengan membersihkan lingkungan, sungai, dan saluran air. Tradisi ini merupakan bentuk kearifan lokal dalam mitigasi banjir dan pelestarian lingkungan.
                 """,
                 metadata={"topic": "Mapag Hujan", "category": "culture"}
-            ),
-            Document(
-                page_content="""
-                Topik: Prinsip Kimia Hijau
-                Pertanyaan: Apa saja prinsip-prinsip kimia hijau?
-                Jawaban: 12 Prinsip Kimia Hijau meliputi: 1. Pencegahan limbah, 2. Atom economy, 3. Sintesis bahan kimia yang kurang berbahaya, 4. Desain bahan kimia yang lebih aman, 5. Pelarut dan bahan pembantu yang lebih aman, 6. Efisiensi energi, 7. Penggunaan bahan baku terbarukan, 8. Mengurangi turunan, 9. Katalisis, 10. Desain untuk degradasi, 11. Analisis real-time untuk pencegahan polusi, 12. Kimia yang secara inherent lebih aman untuk pencegahan kecelakaan.
-                Context: Pendidikan kimia
-                Keywords: prinsip kimia hijau, 12 prinsip, green chemistry principles
-                Related topics: kimia berkelanjutan, pendidikan lingkungan
-                """,
-                metadata={"topic": "Prinsip Kimia Hijau", "category": "education"}
-            ),
-            Document(
-                page_content="""
-                Topik: Mitigasi Banjir
-                Pertanyaan: Bagaimana cara mitigasi banjir?
-                Jawaban: Mitigasi banjir dapat dilakukan melalui: membersihkan sungai dan saluran air, membuat biopori untuk meningkatkan resapan air, menanam pohon, tidak membuang sampah sembarangan, dan partisipasi masyarakat dalam menjaga lingkungan.
-                Context: Konservasi lingkungan
-                Keywords: mitigasi banjir, biopori, konservasi air, lingkungan
-                Related topics: pencegahan banjir, pelestarian lingkungan
-                """,
-                metadata={"topic": "Mitigasi Banjir", "category": "environment"}
             )
         ]
         
@@ -456,44 +531,137 @@ def initialize_rag_system():
                 content_parts.append(f"Keywords: {row['keywords']}")
             if "related_topics" in df.columns and pd.notna(row.get('related_topics')): 
                 content_parts.append(f"Related topics: {row['related_topics']}")
+
+        # Untuk fallback, kita buat simple retriever tanpa embeddings
+        class SimpleFallbackRetriever:
+            def __init__(self, docs):
+                self.docs = docs
             
-            content = "\n\n".join(content_parts).strip()
-            if content:  # Only add if content is not empty
-                metadata = {col: row[col] for col in df.columns if col in ["id", "category", "topic"] and pd.notna(row.get(col))}
+            def get_relevant_documents(self, query):
+                # Return semua dokumen untuk semua query (sangat sederhana)
+                return self.docs
+            
+            async def aget_relevant_documents(self, query):
+                return self.docs
+        
+        retriever = SimpleFallbackRetriever(fallback_docs)
+        logger.info("[+] Simple fallback retriever created successfully")
+        return retriever
+        
+    except Exception as e:
+        logger.error(f"Error creating simple fallback retriever: {e}")
+        return None
+    
+def create_simple_csv_retriever():
+    """Create a simple retriever that searches directly in CSV"""
+    try:
+        logger.info("Creating simple CSV retriever...")
+        
+        # Load CSV data directly
+        df = pd.read_csv(CSV_PATH, dtype=str).fillna("")
+        logger.info(f"Loaded CSV with {len(df)} rows")
+        
+        # Prepare documents
+        documents = []
+        for _, row in df.iterrows():
+            # Create rich content for better retrieval
+            content = f"""
+Topic: {row.get('topic', '')}
+Question: {row.get('question', '')}  
+Answer: {row.get('answer', '')}
+Keywords: {row.get('keywords', '')}
+Context: {row.get('context', '')}
+Category: {row.get('category', '')}
+""".strip()
+            
+            if content:
+                metadata = {
+                    'id': row.get('id', ''),
+                    'topic': row.get('topic', ''),
+                    'category': row.get('category', ''),
+                    'source': 'ecombot_knowledge_base'
+                }
                 documents.append(Document(page_content=content, metadata=metadata))
 
-        logger.info(f"[+] Loaded {len(documents)} documents")
+        logger.info(f"Processed {len(documents)} documents")
 
-        if not documents:
-            logger.warning("No documents found in CSV, using fallback data")
-            return create_fallback_retriever()
-
-        # Split text into chunks
-        splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
-        chunks = splitter.split_documents(documents)
-        logger.info(f"[+] Split into {len(chunks)} chunks")
-
-        # Create directory if it doesn't exist
-        os.makedirs(PERSIST_DIR, exist_ok=True)
-
-        # Embedding & Vectorstore
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        vectorstore = Chroma.from_documents(
-            chunks, 
-            embeddings, 
-            persist_directory=PERSIST_DIR
-        )
-        vectorstore.persist()
-        retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
-        logger.info("[+] Vectorstore created and persisted successfully")
+        class SimpleCSVRetriever:
+            def __init__(self, docs):
+                self.docs = docs
+            
+            def get_relevant_documents(self, query):
+                query_lower = query.lower().strip()
+                scored_docs = []
+                
+                for doc in self.docs:
+                    score = 0
+                    content_lower = doc.page_content.lower()
+                    
+                    # Exact match scoring
+                    if query_lower in content_lower:
+                        score += 20
+                    
+                    # Individual word matching dengan bobot lebih tinggi
+                    query_words = query_lower.split()
+                    for word in query_words:
+                        if len(word) > 2:  # Kata dengan minimal 3 karakter
+                            if word in content_lower:
+                                score += 5
+                    
+                    # Boost score untuk dokumen yang sangat relevan
+                    if any(keyword in content_lower for keyword in ['ecombot', 'greenverse', 'pembuat', 'pencipta', 'tim']):
+                        score += 10
+                    
+                    if score > 0:
+                        scored_docs.append((score, doc))
+                
+                # Sort by score descending
+                scored_docs.sort(key=lambda x: x[0], reverse=True)
+                
+                # Return top documents
+                return [doc for score, doc in scored_docs[:5]]
+            
+            async def aget_relevant_documents(self, query):
+                return self.get_relevant_documents(query)
+        
+        retriever = SimpleCSVRetriever(documents)
+        logger.info("✅ Simple CSV retriever created successfully")
+        
+        # Test dengan query spesifik
+        test_query = "Siapa yang membuat ECOMBOT?"
+        test_docs = retriever.get_relevant_documents(test_query)
+        logger.info(f"🧪 Test retrieval for '{test_query}': Found {len(test_docs)} docs")
+        
+        for i, doc in enumerate(test_docs):
+            logger.info(f"   Test Doc {i+1}: {doc.page_content[:100]}...")
         
         return retriever
         
     except Exception as e:
-        logger.error(f"Error initializing RAG system: {e}")
-        logger.info("Using fallback retriever")
+        logger.error(f"Error creating simple CSV retriever: {e}")
+        return None
+    
+def initialize_rag_system():
+    """Initialize the RAG system - menggunakan simple retriever untuk reliability"""
+    global retriever
+    try:
+        logger.info("=== STARTING RAG INITIALIZATION (SIMPLE MODE) ===")
+        
+        # Gunakan simple CSV retriever untuk reliability
+        retriever = create_simple_csv_retriever()
+        
+        if retriever:
+            logger.info("✅ RAG system initialized successfully dengan simple retriever")
+            return retriever
+        else:
+            logger.error("❌ Failed to initialize simple retriever")
+            return create_fallback_retriever()
+        
+    except Exception as e:
+        logger.error(f"❌ Error initializing RAG system: {e}")
         return create_fallback_retriever()
-
+            
+    
 def create_fallback_csv():
     """Create a fallback CSV file with basic data"""
     try:
@@ -538,19 +706,60 @@ def create_fallback_csv():
         logger.info(f"Fallback CSV created at: {CSV_PATH}")
     except Exception as e:
         logger.error(f"Error creating fallback CSV: {e}")
+        
+def initialize_all_systems():
+    """Initialize semua sistem sekaligus dengan error handling yang lebih baik"""
+    global gemini_model, chatbot_app, retriever
+    
+    logger.info("🔄 Initializing all systems...")
+    
+    status_report = {}
+    
+    # Initialize Gemini Model
+    try:
+        gemini_model = initialize_gemini_model()
+        status_report["gemini_model"] = "✅ Ready" if gemini_model else "❌ Failed"
+        logger.info(f"Gemini Model: {status_report['gemini_model']}")
+    except Exception as e:
+        logger.error(f"Gemini initialization failed: {e}")
+        status_report["gemini_model"] = f"❌ Failed: {str(e)}"
+        gemini_model = None
+    
+    # Initialize RAG System
+    try:
+        retriever = initialize_rag_system()
+        status_report["rag_system"] = "✅ Ready" if retriever else "❌ Failed"
+        logger.info(f"RAG System: {status_report['rag_system']}")
+    except Exception as e:
+        logger.error(f"RAG initialization failed: {e}")
+        status_report["rag_system"] = f"❌ Failed: {str(e)}"
+        retriever = None
+    
+    # Initialize LangGraph Chatbot
+    try:
+        if gemini_model:
+            chatbot_app = create_chatbot_graph()
+            status_report["langgraph_chatbot"] = "✅ Ready" if chatbot_app else "❌ Failed"
+        else:
+            status_report["langgraph_chatbot"] = "❌ Failed: No Gemini model"
+            chatbot_app = None
+        logger.info(f"LangGraph Chatbot: {status_report['langgraph_chatbot']}")
+    except Exception as e:
+        logger.error(f"LangGraph initialization failed: {e}")
+        status_report["langgraph_chatbot"] = f"❌ Failed: {str(e)}"
+        chatbot_app = None
+    
+    logger.info(f"System Status: {status_report}")
+    return status_report
 
-# Initialize RAG system dengan error handling
+# Panggil initialization dengan error handling
 try:
-    logger.info("Attempting to initialize RAG system...")
-    rag_status = initialize_rag_system()
-    if rag_status:
-        logger.info("✅ RAG system initialized successfully")
-    else:
-        logger.warning("⚠️ RAG system initialization failed, using fallback")
+    initialize_all_systems()
 except Exception as e:
-    logger.error(f"❌ RAG system initialization error: {e}")
+    logger.error(f"Failed to initialize systems: {e}")
 
-# ===== VIEWS PERTAMA (EXISTING) =====
+# ===== VIEWS UTAMA =====
+
 @api_view(['POST'])
 def register(request):
     try:
@@ -568,20 +777,12 @@ def register(request):
     except IntegrityError:
         return Response({'error': 'Username already exists'}, status=400)
 
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.decorators import permission_classes
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def ecombot(request):
     return Response({
         "message": f"Halo, {request.user.username}! Ini halaman profil kamu."
     })
-
-
-from django.http import JsonResponse
-from django.conf import settings
-from .utils.cloudinary_utils import get_optimized_resources
 
 def manifest(request, comic_slug, episode_slug):
     prefix = f"comics/{comic_slug}/{episode_slug}"
@@ -603,13 +804,6 @@ def manifest(request, comic_slug, episode_slug):
     }
     
     return JsonResponse(manifest)
-
-
-from .models import UserComicProgress
-
-from rest_framework import status
-
-REQUIRED_PAGE_THRESHOLD = 3  # indeks (0-based), berarti halaman ke-4
 
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
@@ -676,24 +870,21 @@ def comic_progress(request):
             "last_page": progress.last_page
         })
 
-
-
-from rest_framework import status
-
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def comic_mark_finish(request):
     """
     POST /api/comic-progress/finish/
     body: { "comic": "...", "episode": "...", "last_page": 3, "complete": true }
-    Jika client mengirim "complete": true -> set finish=True langsung untuk user itu.
     """
     user = request.user
     comic = request.data.get("comic")
     episode = request.data.get("episode")
     last_page_body = request.data.get("last_page")
-    complete_flag = bool(request.data.get("complete", False))  # <-- new flag
-    force = bool(request.data.get("force", False))  # tetap ada untuk admin override if needed
+    complete_flag = bool(request.data.get("complete", False))
+    force = bool(request.data.get("force", False))
+
+    REQUIRED_PAGE_THRESHOLD = 3
 
     if not comic or not episode:
         return Response({"error": "Missing comic or episode"}, status=status.HTTP_400_BAD_REQUEST)
@@ -719,7 +910,6 @@ def comic_mark_finish(request):
         progress.finish = True
         progress.save()
         return Response({"saved": True, "finish": True, "message": "Marked as complete by user"})
-
 
     # Force (untuk staff/admin)
     if force and user.is_staff:
@@ -752,7 +942,7 @@ def comic_mark_finish(request):
         )
 
 @api_view(['POST', 'GET'])
-@permission_classes([AllowAny])  # ✅ tidak perlu login
+@permission_classes([AllowAny])
 def feedback_view(request):
     if request.method == 'POST':
         serializer = FeedbackSerializer(data=request.data)
@@ -766,9 +956,6 @@ def feedback_view(request):
         serializer = FeedbackSerializer(feedbacks, many=True)
         return Response(serializer.data)
 
-from rest_framework.views import APIView
-from rest_framework_simplejwt.tokens import RefreshToken, TokenError
-
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -779,334 +966,53 @@ class LogoutView(APIView):
                 return Response({"detail": "Refresh token tidak diberikan"}, status=status.HTTP_400_BAD_REQUEST)
 
             token = RefreshToken(refresh_token)
-            token.blacklist()  # blacklist token agar tidak bisa dipakai lagi
+            token.blacklist()
             return Response({"detail": "Logout berhasil"}, status=status.HTTP_205_RESET_CONTENT)
         except TokenError:
             return Response({"detail": "Token tidak valid atau sudah kadaluarsa"}, status=status.HTTP_400_BAD_REQUEST)
 
-
-
-
-
-
-
-
-
-
-
-
-# ===== FUNGSI GEMINI YANG DIPERBAIKI =====
-
-def query_gemini(prompt):
-    """Query Gemini API dengan enhanced error handling"""
-    try:
-        # Debug API key sebelum digunakan
-        print(f"=== DEBUG query_gemini: API_KEY available: {bool(API_KEY)} ===")
-        
-        if not API_KEY:
-            error_msg = "API key tidak ditemukan. Pastikan GEMINI_API_KEY sudah di-set di file .env"
-            logger.error(error_msg)
-            return f"Maaf, {error_msg}. Silakan hubungi administrator."
-
-        # Validasi format API key
-        if not API_KEY.startswith('AIza'):
-            error_msg = f"Format API key tidak valid. Harus dimulai dengan 'AIza'. Dapatkan: {API_KEY[:10]}..."
-            logger.error(error_msg)
-            return f"Maaf, {error_msg}. Silakan periksa kunci API Gemini Anda."
-
-        # Initialize client dengan cara yang benar
-        try:
-            # PERBAIKAN: Konfigurasi yang benar untuk google-generativeai
-            genai.configure(api_key=API_KEY)
-            print("=== DEBUG: Gemini client configured successfully ===")
-        except Exception as client_error:
-            logger.error(f"Error configuring Gemini client: {client_error}")
-            return f"Maaf, gagal mengkonfigurasi klien Gemini: {str(client_error)}"
-
-        # Generate content
-        try:
-            print("=== DEBUG: Sending request to Gemini API ===")
-            
-            # PERBAIKAN: Gunakan model yang benar
-            model = genai.GenerativeModel(MODEL)
-            response = model.generate_content(prompt)
-            
-            print("=== DEBUG: Received response from Gemini API ===")
-            
-            if hasattr(response, 'text'):
-                return response.text
-            else:
-                logger.error(f"Unexpected response format: {response}")
-                return "Maaf, format respons dari API tidak dikenali."
-                
-        except Exception as gen_error:
-            logger.error(f"Error generating content: {gen_error}")
-            error_str = str(gen_error)
-            
-            if "quota" in error_str.lower():
-                return "Maaf, kuota API telah habis. Silakan coba lagi nanti atau hubungi administrator."
-            elif "permission" in error_str.lower() or "invalid" in error_str.lower():
-                return "Maaf, API key tidak valid atau tidak memiliki izin. Silakan periksa kunci API Anda."
-            elif "network" in error_str.lower() or "connection" in error_str.lower():
-                return "Maaf, terjadi masalah koneksi. Silakan periksa koneksi internet Anda dan coba lagi."
-            elif "safety" in error_str.lower():
-                return "Maaf, pertanyaan Anda ditolak oleh filter keamanan. Silakan coba dengan pertanyaan lain."
-            else:
-                return f"Maaf, terjadi kesalahan saat memproses pertanyaan: {error_str}"
-        
-    except Exception as e:
-        logger.error(f"Unexpected error in query_gemini: {e}")
-        return f"Maaf, terjadi kesalahan tak terduga: {str(e)}. Silakan coba lagi."
-
-# ===== ENDPOINT RAG YANG DIPERBAIKI =====
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def ask_question(request):
-    """Handle question asking with RAG system - ENHANCED VERSION"""
-    try:
-        question = request.data.get('question', '').strip()
-        
-        if not question:
-            return Response(
-                {"answer": "Silakan ajukan pertanyaan yang lebih spesifik."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        logger.info(f"Processing question: '{question}'")
-        
-        # Get relevant documents from RAG system
-        context = ""
-        relevant_docs = []
-        
-        if retriever:
-            try:
-                docs = retriever.get_relevant_documents(question)
-                context = "\n\n".join([d.page_content for d in docs])
-                relevant_docs = docs
-                logger.info(f"Retrieved {len(docs)} documents for question")
-            except Exception as e:
-                logger.error(f"Error retrieving documents: {e}")
-                context = "Informasi dari database sedang tidak tersedia."
-        else:
-            logger.warning("RAG system not available, using fallback")
-            context = "Sistem pencarian informasi sedang dalam perbaikan."
-        
-        # Prepare enhanced prompt for Gemini
-        full_prompt = f"""
-Anda adalah asisten ahli bernama Ecombot yang memiliki pengetahuan tentang:
-
-TOPIK UTAMA:
-1. Kimia Hijau (Green Chemistry) dan 12 prinsipnya
-2. Tradisi Mapag Hujan di Jawa Barat (Bandung dan Subang)
-3. Filosofi Sunda seperti Seba Tangkal Muru Cai
-4. Program Maraton Bebersih Walungan dan Susukan
-5. Konservasi lingkungan dan mitigasi banjir
-6. Pendidikan STEM (Science, Technology, Engineering, Arts, Mathematics)
-
-INFORMASI KONTEKS:
-{context}
-
-PERTANYAAN USER:
-{question}
-
-INSTRUKSI:
-1. Jawablah dengan bahasa Indonesia yang jelas dan mudah dipahami
-2. Jika informasi dari konteks tidak cukup, gunakan pengetahuan umum Anda
-3. Fokus pada topik-topik utama di atas
-4. Berikan jawaban yang informatif dan membantu
-5. Jika pertanyaan di luar topik, jelaskan dengan sopan dan arahkan ke topik yang relevan
-
-JAWABAN:
-"""
-        
-        # Get answer from Gemini
-        answer = query_gemini(full_prompt)
-        
-        # Log the interaction for debugging
-        logger.info(f"Q: {question} | A: {answer[:100]}... | Docs: {len(relevant_docs)}")
-        
-        return Response({
-            "answer": answer.strip(),
-            "sources_count": len(relevant_docs),
-            "rag_system": "active" if retriever and relevant_docs else "fallback"
-        })
-        
-    except Exception as e:
-        logger.error(f"Unexpected error in ask_question: {e}")
-        return Response(
-            {"answer": "Maaf, terjadi kesalahan sistem. Silakan coba lagi dalam beberapa saat atau hubungi administrator."}, 
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-# ===== ENDPOINT DEBUG & HEALTH CHECK =====
-
-@api_view(['GET'])
-@permission_classes([AllowAny])
-def health_check(request):
-    """Health check endpoint dengan debugging detail"""
-    rag_status = "initialized" if retriever else "failed"
-    api_key_info = {
-        "available": bool(API_KEY),
-        "length": len(API_KEY) if API_KEY else 0,
-        "starts_with": API_KEY[:10] + "..." if API_KEY else "N/A"
-    }
-    
-    # Check file existence
-    csv_exists = os.path.exists(CSV_PATH)
-    persist_exists = os.path.exists(PERSIST_DIR)
-    
-    return Response({
-        "status": "healthy", 
-        "rag_system": rag_status,
-        "api_key": api_key_info,
-        "model": MODEL,
-        "files": {
-            "csv_exists": csv_exists,
-            "csv_path": CSV_PATH,
-            "persist_dir_exists": persist_exists,
-            "persist_dir": PERSIST_DIR
-        }
-    })
-
-@api_view(['GET'])
-@permission_classes([AllowAny])
-def debug_rag_status(request):
-    """Debug endpoint to check RAG system status"""
-    try:
-        status_info = {
-            "rag_system": "initialized" if retriever else "not_initialized",
-            "api_key_available": bool(API_KEY),
-            "csv_file_exists": os.path.exists(CSV_PATH),
-            "vectorstore_exists": os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR),
-            "csv_path": CSV_PATH,
-            "persist_dir": PERSIST_DIR,
-            "model": MODEL
-        }
-        
-        # Test retriever if available
-        if retriever:
-            try:
-                test_docs = retriever.get_relevant_documents("kimia hijau")
-                status_info["retriever_test"] = {
-                    "success": True,
-                    "documents_found": len(test_docs)
-                }
-            except Exception as e:
-                status_info["retriever_test"] = {
-                    "success": False,
-                    "error": str(e)
-                }
-        
-        return Response(status_info)
-        
-    except Exception as e:
-        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-# ===== ENDPOINT RELOAD RAG SYSTEM =====
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def reload_rag_system(request):
-    """Endpoint to reload RAG system"""
-    try:
-        global retriever
-        retriever = initialize_rag_system()
-        
-        if retriever:
-            return Response({
-                "status": "success", 
-                "message": "RAG system reloaded successfully"
-            })
-        else:
-            return Response({
-                "status": "error", 
-                "message": "Failed to reload RAG system"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            
-    except Exception as e:
-        logger.error(f"Error reloading RAG system: {e}")
-        return Response({
-            "status": "error", 
-            "message": f"Error reloading RAG system: {str(e)}"
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-# ===== ENDPOINT FORCE RELOAD (ALIAS) =====
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def force_rag_reload(request):
-    """Alias for reload_rag_system for backward compatibility"""
-    return reload_rag_system(request)
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def force_rag_reload(request):
-    """Force reload RAG system (admin only)"""
-    try:
-        global retriever
-        retriever = initialize_rag_system()
-        
-        if retriever:
-            return Response({
-                "status": "success", 
-                "message": "RAG system reloaded successfully"
-            })
-        else:
-            return Response({
-                "status": "error", 
-                "message": "Failed to reload RAG system"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            
-    except Exception as e:
-        logger.error(f"Error reloading RAG system: {e}")
-        return Response({
-            "status": "error", 
-            "message": f"Error reloading RAG system: {str(e)}"
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-# ===== VIEWS KETIGA (CHATBOT ACTIVITY SYSTEM - PERBAIKAN) =====
+# ===== CHATBOT VIEWS DENGAN LANGGRAPH =====
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def start_chat_session(request):
-    """Memulai sesi chat baru untuk kegiatan pembelajaran - FIXED"""
+    """Memulai sesi chat baru dengan LangGraph"""
     try:
         session_id = request.data.get('session_id', f"session_{timezone.now().strftime('%Y%m%d_%H%M%S')}")
+        activity_id = request.data.get('activity_id', 'intro')
         
+        # Buat atau dapatkan session
         session, created = ChatSession.objects.get_or_create(
             user=request.user,
             session_id=session_id,
             defaults={
-                'current_step': 'intro',
+                'current_step': activity_id,
                 'status': 'active'
             }
         )
         
-        # Jika session baru, buat pesan intro
-        if created:
-            intro_data = CHATBOT_FLOW['intro']
+        # Jika session baru, inisialisasi di LangGraph
+        if created and chatbot_app:
+            config = {"configurable": {"thread_id": session_id}}
+            
+            # Buat pesan pembuka
+            opening_message = "Halo! 👋 Saya Aquano, asisten pembelajaran Ecombot. Saya siap membantu Anda menjelajahi dunia Kimia Hijau dan Tradisi Mapag Hujan. Ada yang bisa saya bantu hari ini?"
+            
+            # Simpan ke database
             ChatMessage.objects.create(
                 session=session,
                 message_type='bot',
-                character=intro_data.get('character', 'Aquano'),
-                message_text=intro_data.get('message', ''),
-                message_data={
-                    'title': intro_data.get('title'),
-                    'image_url': intro_data.get('image_url'),
-                    'image_source': intro_data.get('image_source'),
-                    'question': intro_data.get('question'),
-                    'next_keywords': intro_data.get('next_keywords', [])
-                },
-                step_id=intro_data.get('id', 'intro')
+                character='Aquano',
+                message_text=opening_message,
+                step_id=activity_id,
+                activity_id=activity_id
             )
             
             # Buat user progress
             UserProgress.objects.create(
                 user=request.user,
                 session=session,
-                current_kegiatan='intro',
+                current_kegiatan=activity_id,
                 total_answers=0,
             )
         
@@ -1123,23 +1029,79 @@ def start_chat_session(request):
             'status': 'error',
             'message': 'Gagal memulai sesi chat'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+def send_chat_message_fallback(session, message_text, activity_id):
+    """Fallback method jika LangGraph tidak tersedia"""
+    try:
+        # Gunakan RAG system langsung
+        if retriever:
+            try:
+                docs = retriever.get_relevant_documents(message_text)
+                context = "\n\n".join([d.page_content for d in docs[:2]])
+                
+                prompt = f"""
+KONTEKS:
+{context}
+
+PERTANYAAN USER:
+{message_text}
+
+JAWABAN (gunakan bahasa Indonesia yang jelas dan membantu):
+"""
+            except Exception as rag_error:
+                logger.error(f"RAG error: {rag_error}")
+                prompt = message_text
+        else:
+            prompt = message_text
         
+        # Gunakan Gemini langsung
+        if gemini_model:
+            response = gemini_model.invoke(prompt)
+            bot_response = response.content
+        else:
+            bot_response = "Maaf, sistem sedang dalam perbaikan. Silakan coba lagi nanti."
+        
+        # Simpan ke database
+        bot_message = ChatMessage.objects.create(
+            session=session,
+            message_type='bot',
+            character='Aquano',
+            message_text=bot_response,
+            step_id=activity_id,
+            activity_id=activity_id
+        )
+        
+        session.current_step = activity_id
+        session.save()
+        
+        return Response({
+            'status': 'success',
+            'message_id': bot_message.id,
+            'timestamp': bot_message.timestamp,
+            'response': bot_response,
+            'session_id': session.session_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in fallback chat: {e}")
+        return Response({
+            'status': 'error',
+            'message': 'Gagal memproses pesan'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def send_chat_message(request):
-    """Mengirim pesan dan mendapatkan respons bot dalam kegiatan pembelajaran"""
+    """Mengirim pesan dan mendapatkan respons menggunakan LangGraph"""
     try:
         session_id = request.data.get('session_id')
-        message_type = request.data.get('message_type')
-        character = request.data.get('character')
         message_text = request.data.get('message_text')
-        step_id = request.data.get('step_id')
-        message_data = request.data.get('message_data', {})
+        activity_id = request.data.get('activity_id', 'general')
         
-        if not all([session_id, message_type, message_text, step_id]):
+        if not all([session_id, message_text]):
             return Response({
                 'status': 'error',
-                'message': 'Data tidak lengkap'
+                'message': 'session_id dan message_text diperlukan'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Dapatkan session
@@ -1151,172 +1113,202 @@ def send_chat_message(request):
                 'message': 'Sesi tidak ditemukan'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Simpan pesan
-        message = ChatMessage.objects.create(
+        # Simpan pesan user ke database
+        user_message = ChatMessage.objects.create(
             session=session,
-            message_type=message_type,
-            character=character,
+            message_type='user',
+            character='User',
             message_text=message_text,
-            message_data=message_data,
-            step_id=step_id
+            step_id=activity_id,
+            activity_id=activity_id
         )
         
-        # Update session current step
-        session.current_step = step_id
-        session.save()
-        
-        return Response({
-            'status': 'success',
-            'message_id': message.id,
-            'timestamp': message.timestamp
-        })
-        
+        # Process dengan LangGraph jika tersedia
+        if chatbot_app:
+            try:
+                config = {"configurable": {"thread_id": session_id}}
+                
+                # Prepare state untuk LangGraph
+                input_state = {
+                    "messages": [HumanMessage(content=message_text)],
+                    "session_id": session_id,
+                    "user_id": str(request.user.id),
+                    "current_activity": activity_id
+                }
+                
+                # Invoke LangGraph
+                output = chatbot_app.invoke(input_state, config)
+                
+                # Dapatkan respons terakhir
+                bot_response = None
+                for msg in reversed(output["messages"]):
+                    if isinstance(msg, AIMessage):
+                        bot_response = msg.content
+                        break
+                
+                if bot_response:
+                    # Simpan respons bot ke database
+                    bot_message = ChatMessage.objects.create(
+                        session=session,
+                        message_type='bot',
+                        character='Aquano',
+                        message_text=bot_response,
+                        step_id=activity_id,
+                        activity_id=activity_id
+                    )
+                    
+                    # Update session
+                    session.current_step = activity_id
+                    session.save()
+                    
+                    return Response({
+                        'status': 'success',
+                        'message_id': bot_message.id,
+                        'timestamp': bot_message.timestamp,
+                        'response': bot_response,
+                        'session_id': session_id
+                    })
+                    
+            except Exception as graph_error:
+                logger.error(f"LangGraph error: {graph_error}")
+                # Fallback ke sistem lama jika LangGraph gagal
+                return send_chat_message_fallback(session, message_text, activity_id)
+        else:
+            # Fallback jika LangGraph tidak tersedia
+            return send_chat_message_fallback(session, message_text, activity_id)
+            
     except Exception as e:
-        logger.error(f"Error sending chat message: {e}")
+        logger.error(f"Error in send_chat_message: {e}")
         return Response({
             'status': 'error',
             'message': 'Gagal mengirim pesan'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def get_activity_history(request, session_id, activity_id):
-    """Mendapatkan histori percakapan untuk activity tertentu"""
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def ask_question(request):
+    """Handle question asking dengan RAG system atau fallback"""
     try:
-        session = ChatSession.objects.get(session_id=session_id, user=request.user)
+        question = request.data.get('question', '').strip()
         
-        messages = ChatMessage.objects.filter(
-            session=session,
-            step_id=activity_id
-        ).order_by('timestamp')
+        if not question:
+            return Response(
+                {"answer": "Silakan ajukan pertanyaan yang lebih spesifik."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
-        answers = UserAnswer.objects.filter(
-            session=session,
-            step_id=activity_id
-        ).order_by('created_at')
+        logger.info(f"🔍 Processing question: '{question}'")
         
-        history = {
-            'messages': ChatMessageSerializer(messages, many=True).data,
-            'answers': UserAnswerSerializer(answers, many=True).data
-        }
+        # Get relevant documents from RAG system atau fallback
+        context = ""
+        relevant_docs = []
+        rag_status = "fallback"
         
-        return Response({
-            'status': 'success',
-            'session_id': session_id,
-            'activity_id': activity_id,
-            'history': history
-        })
-        
-    except ChatSession.DoesNotExist:
-        return Response({
-            'status': 'error',
-            'message': 'Sesi tidak ditemukan'
-        }, status=status.HTTP_404_NOT_FOUND)
-    except Exception as e:
-        logger.error(f"Error getting activity history: {e}")
-        return Response({
-            'status': 'error',
-            'message': 'Gagal mengambil histori'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def get_session_overview(request, session_id):
-    """Mendapatkan overview seluruh sesi"""
-    try:
-        session = ChatSession.objects.get(session_id=session_id, user=request.user)
-        
-        activities = [
-            'intro', 'kimia_hijau', 'pre_kegiatan', 
-            'kegiatan_1', 'kegiatan_2', 'kegiatan_3', 'kegiatan_4',
-            'kegiatan_5', 'kegiatan_6', 'kegiatan_7', 'completion'
-        ]
-        
-        overview = {}
-        for activity in activities:
-            messages_count = ChatMessage.objects.filter(
-                session=session, step_id=activity
-            ).count()
-            
-            answers_count = UserAnswer.objects.filter(
-                session=session, step_id=activity
-            ).count()
-            
+        if retriever:
             try:
-                activity_progress = ActivityProgress.objects.get(
-                    session=session, activity_id=activity
-                )
-                status = activity_progress.status
-            except ActivityProgress.DoesNotExist:
-                status = 'not_started'
-            
-            overview[activity] = {
-                'messages_count': messages_count,
-                'answers_count': answers_count,
-                'status': status
-            }
+                docs = retriever.get_relevant_documents(question)
+                logger.info(f"📄 Retrieved {len(docs)} documents for question: '{question}'")
+                
+                # LOG DETAIL SETIAP DOKUMEN YANG DITEMUKAN
+                for i, doc in enumerate(docs):
+                    logger.info(f"   📝 Doc {i+1} Content: {doc.page_content}")
+                    logger.info(f"   🏷️  Doc {i+1} Metadata: {doc.metadata}")
+                    logger.info("   " + "-" * 50)
+                
+                context = "\n\n".join([f"Dokumen {i+1}:\n{d.page_content}" for i, d in enumerate(docs)])
+                relevant_docs = docs
+                rag_status = "active" if docs else "no_docs"
+                
+            except Exception as e:
+                logger.error(f"❌ Error retrieving documents: {e}")
+                context = "Sistem pencarian informasi sedang dalam perbaikan."
+                rag_status = "error"
+        else:
+            logger.warning("RAG system not available, using direct Gemini")
+            context = "Sistem pencarian informasi sedang dalam perbaikan."
+            rag_status = "not_available"
+        
+        # Prepare prompt dengan konteks yang lebih jelas
+        if context and rag_status == "active":
+            full_prompt = f"""
+INFORMASI KONTEKS YANG DITEMUKAN:
+{context}
+
+PERTANYAAN USER:
+{question}
+
+INSTRUKSI: 
+- Jawab pertanyaan berdasarkan informasi dalam konteks di atas
+- Jika informasi tersedia dalam konteks, berikan jawaban yang akurat
+- Jika informasi tidak tersedia dalam konteks, jelaskan bahwa informasi tidak ditemukan
+- Gunakan bahasa Indonesia yang jelas dan informatif
+
+JAWABAN:
+"""
+        else:
+            full_prompt = f"""
+PERTANYAAN USER:
+{question}
+
+JAWABAN (gunakan bahasa Indonesia yang jelas dan informatif. Jika tidak tahu jawabannya, jelaskan bahwa informasi tidak tersedia):
+"""
+        
+        # Get answer from Gemini
+        answer = "Maaf, sistem AI sedang tidak tersedia. Silakan coba lagi nanti."
+        if gemini_model:
+            try:
+                logger.info(f"🤖 Sending prompt to Gemini...")
+                response = gemini_model.invoke(full_prompt)
+                answer = response.content.strip()
+                logger.info(f"✅ Gemini response: {answer[:200]}...")
+            except Exception as gemini_error:
+                logger.error(f"❌ Gemini error: {gemini_error}")
+                answer = "Maaf, terjadi kesalahan saat memproses pertanyaan Anda."
+        
+        # Log the interaction
+        logger.info(f"📊 Summary - Q: '{question}' | A: {answer[:100]}... | RAG: {rag_status} | Docs: {len(relevant_docs)}")
         
         return Response({
-            'status': 'success',
-            'overview': overview
+            "answer": answer,
+            "sources_count": len(relevant_docs),
+            "rag_system": rag_status
         })
         
-    except ChatSession.DoesNotExist:
-        return Response({
-            'status': 'error',
-            'message': 'Sesi tidak ditemukan'
-        }, status=status.HTTP_404_NOT_FOUND)
-
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in ask_question: {e}")
+        return Response(
+            {"answer": "Maaf, terjadi kesalahan sistem. Silakan coba lagi dalam beberapa saat."}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+        
+        
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def submit_activity_answer(request):
-    """Menyimpan jawaban user untuk activity tertentu - FIXED VERSION"""
+    """Menyimpan jawaban user untuk activity tertentu"""
     try:
-        print("=== DEBUG: submit_activity_answer CALLED ===")
-        print("Request data:", request.data)
-        print("User:", request.user.username)
-        
-        # Extract data dengan fallback yang lebih baik
         session_id = request.data.get('session_id')
-        step_id = request.data.get('step_id') or request.data.get('activity_id')
+        activity_id = request.data.get('activity_id')
         question_data = request.data.get('question_data', {})
         answer_text = request.data.get('answer_text', '')
         answer_type = request.data.get('answer_type', 'essay')
         
-        # Debug detail
-        print(f"Session ID: {session_id}")
-        print(f"Step ID: {step_id}")
-        print(f"Question Data: {question_data}")
-        print(f"Answer Text length: {len(answer_text)}")
-        print(f"Answer Type: {answer_type}")
-        
-        # Validasi data yang lebih fleksibel
-        if not session_id:
-            logger.error("Missing session_id")
+        if not all([session_id, activity_id]):
             return Response({
                 'status': 'error',
-                'message': 'Session ID diperlukan'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        if not step_id:
-            logger.error("Missing step_id")
-            return Response({
-                'status': 'error',
-                'message': 'Step ID diperlukan'
+                'message': 'Session ID dan Activity ID diperlukan'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Dapatkan session
         try:
             session = ChatSession.objects.get(session_id=session_id, user=request.user)
-            print(f"Session found: {session.session_id}")
         except ChatSession.DoesNotExist:
-            logger.error(f"Session not found: {session_id} for user {request.user.username}")
             return Response({
                 'status': 'error',
                 'message': 'Sesi tidak ditemukan'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Extract question data dengan fallback yang lebih robust
+        # Extract question data
         if isinstance(question_data, str):
             try:
                 question_data = json.loads(question_data)
@@ -1327,34 +1319,24 @@ def submit_activity_answer(request):
         storage_key = question_data.get('storage_key') or f"storage_{question_id}"
         question_text = question_data.get('text') or question_data.get('question_text') or 'Pertanyaan tidak tersedia'
         
-        print(f"Processed question data:")
-        print(f"  Question ID: {question_id}")
-        print(f"  Storage Key: {storage_key}")
-        print(f"  Question Text: {question_text[:100]}...")
-        
-        # Cek apakah jawaban sudah ada
+        # Cek atau buat jawaban
         existing_answer = UserAnswer.objects.filter(
             session=session,
             question_id=question_id
         ).first()
         
         if existing_answer:
-            # Update existing answer
-            print(f"Updating existing answer: {existing_answer.id}")
             existing_answer.answer_text = answer_text
             existing_answer.answer_type = answer_type
             existing_answer.question_text = question_text
-            existing_answer.step_id = step_id
-            existing_answer.activity_id = step_id  # Untuk kompatibilitas
+            existing_answer.step_id = activity_id
+            existing_answer.activity_id = activity_id
             existing_answer.is_submitted = True
             existing_answer.submitted_at = timezone.now()
             existing_answer.save()
-            
             answer = existing_answer
             action = 'updated'
         else:
-            # Buat jawaban baru
-            print("Creating new answer")
             answer = UserAnswer.objects.create(
                 session=session,
                 question_id=question_id,
@@ -1362,42 +1344,36 @@ def submit_activity_answer(request):
                 answer_text=answer_text,
                 answer_type=answer_type,
                 question_text=question_text,
-                step_id=step_id,
-                activity_id=step_id,  # Untuk kompatibilitas
+                step_id=activity_id,
+                activity_id=activity_id,
                 is_submitted=True,
                 submitted_at=timezone.now()
             )
             action = 'created'
         
-        print(f"Answer {action} successfully: {answer.id}")
-        
-        # Update user progress
+        # Update progress
         user_progress, created = UserProgress.objects.get_or_create(
             user=request.user,
             session=session,
             defaults={
-                'current_kegiatan': step_id,
+                'current_kegiatan': activity_id,
                 'total_answers': 1,
             }
         )
         
         if not created:
-            # Hitung total answers yang submitted
             total_submitted = UserAnswer.objects.filter(
                 session=session, 
                 is_submitted=True
             ).count()
-            
             user_progress.total_answers = total_submitted
-            user_progress.current_kegiatan = step_id
+            user_progress.current_kegiatan = activity_id
             user_progress.save()
-        
-        print(f"User progress updated: {user_progress.total_answers} answers")
         
         # Update activity progress
         activity_progress, created = ActivityProgress.objects.get_or_create(
             session=session,
-            activity_id=step_id,
+            activity_id=activity_id,
             defaults={
                 'status': 'completed',
                 'completed_at': timezone.now()
@@ -1409,74 +1385,54 @@ def submit_activity_answer(request):
             activity_progress.completed_at = timezone.now()
             activity_progress.save()
         
-        print(f"Activity progress updated: {step_id}")
-        
-        # Serialize response
+        # Response data
         answer_data = {
             'id': answer.id,
             'question_id': answer.question_id,
             'answer_text': answer.answer_text,
             'answer_type': answer.answer_type,
             'question_text': answer.question_text,
-            'step_id': answer.step_id,
             'activity_id': answer.activity_id,
             'is_submitted': answer.is_submitted,
             'submitted_at': answer.submitted_at.isoformat() if answer.submitted_at else None,
-            'created_at': answer.created_at.isoformat(),
         }
         
-        # Hitung completed activities
         completed_activities_count = ActivityProgress.objects.filter(
             session=session,
             status='completed'
         ).count()
         
-        response_data = {
+        return Response({
             'status': 'success',
             'message': 'Jawaban berhasil disimpan',
             'action': action,
-            'answer_id': answer.id,
             'answer': answer_data,
             'progress': {
                 'total_answers': user_progress.total_answers,
-                'current_step': user_progress.current_kegiatan,
+                'current_activity': user_progress.current_kegiatan,
                 'completed_activities_count': completed_activities_count
             }
-        }
-        
-        print("=== DEBUG: Response data ===")
-        print(response_data)
-        
-        return Response(response_data)
+        })
         
     except Exception as e:
-        logger.error(f"Error submitting activity answer: {str(e)}", exc_info=True)
-        import traceback
-        error_trace = traceback.format_exc()
-        print("FULL ERROR TRACEBACK:")
-        print(error_trace)
-        
+        logger.error(f"Error submitting activity answer: {str(e)}")
         return Response({
             'status': 'error',
-            'message': f'Gagal menyimpan jawaban: {str(e)}',
-            'debug_info': {
-                'error_type': type(e).__name__,
-                'user': request.user.username if request.user else 'Anonymous'
-            }
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)               
-        
+            'message': f'Gagal menyimpan jawaban: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def complete_activity(request):
-    """Menandai activity sebagai selesai - FIXED"""
+    """Menandai activity sebagai selesai"""
     try:
         session_id = request.data.get('session_id')
-        step_id = request.data.get('step_id')  # ⭐⭐ GUNAKAN step_id ⭐⭐
+        activity_id = request.data.get('activity_id')
         
-        if not session_id or not step_id:
+        if not session_id or not activity_id:
             return Response({
                 'status': 'error',
-                'message': 'Session ID dan Step ID diperlukan'
+                'message': 'Session ID dan Activity ID diperlukan'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Dapatkan session
@@ -1491,7 +1447,7 @@ def complete_activity(request):
         # Tandai activity sebagai selesai
         activity_progress, created = ActivityProgress.objects.get_or_create(
             session=session,
-            activity_id=step_id,  # ⭐⭐ GUNAKAN step_id ⭐⭐
+            activity_id=activity_id,
             defaults={
                 'status': 'completed',
                 'completed_at': timezone.now()
@@ -1505,7 +1461,7 @@ def complete_activity(request):
         
         return Response({
             'status': 'success',
-            'message': f'Step {step_id} berhasil diselesaikan'
+            'message': f'Activity {activity_id} berhasil diselesaikan'
         })
         
     except Exception as e:
@@ -1513,35 +1469,77 @@ def complete_activity(request):
         return Response({
             'status': 'error',
             'message': 'Gagal menandai activity sebagai selesai'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)        
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
-from django.db.models import Q
+# ===== TEACHER VIEWS =====
 
-def _int_or_default(value, default):
-    """Helper function to safely parse integer"""
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_teacher_password(request):
+    """Verifikasi password guru dari .env file"""
     try:
-        return int(value) if value else default
-    except (ValueError, TypeError):
-        return default
+        input_password = request.data.get('password', '')
+        
+        # Ambil password dari .env
+        correct_password = os.getenv('TEACHER_PASSWORD', 'greenverse2024')
+        
+        if not input_password:
+            return Response(
+                {
+                    'success': False,
+                    'message': 'Password tidak boleh kosong'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verifikasi password
+        if input_password == correct_password:
+            return Response(
+                {
+                    'success': True,
+                    'message': 'Password benar'
+                },
+                status=status.HTTP_200_OK
+            )
+        else:
+            return Response(
+                {
+                    'success': False,
+                    'message': 'Password salah'
+                },
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+            
+    except Exception as e:
+        print(f"Error in verify_teacher_password: {str(e)}")
+        return Response(
+            {
+                'success': False,
+                'message': 'Terjadi kesalahan server'
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
+from django.core.paginator import Paginator
+from django.db.models import Q, Count
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def teacher_answers(request):
-    """
-    GET /api/teacher/answers/
-    """
+    """GET /api/teacher/answers/"""
     try:
-        # PERBAIKAN: Gunakan step_id sebagai activity_id
-        qs = UserAnswer.objects.select_related("session__user").exclude(
+        # Query dengan filter untuk memastikan data valid
+        qs = UserAnswer.objects.select_related(
+            "session__user"
+        ).exclude(
             session__isnull=True
         ).exclude(
             session__user__isnull=True
         )
 
+        # Filter berdasarkan query params
         q = request.GET.get("q", "").strip()
-        activity = request.GET.get("activity", "").strip()  # Ini mencari di step_id
+        activity = request.GET.get("activity", "").strip()
         answer_type = request.GET.get("answer_type", "").strip()
         date_from = request.GET.get("date_from", "").strip()
         date_to = request.GET.get("date_to", "").strip()
@@ -1555,9 +1553,9 @@ def teacher_answers(request):
                 Q(question_text__icontains=q)
             )
         
-        # Activity filter - CARI DI step_id (karena activity_id disimpan sebagai step_id)
+        # Activity filter
         if activity:
-            qs = qs.filter(step_id__icontains=activity)
+            qs = qs.filter(activity_id__icontains=activity)
         
         # Answer type filter
         if answer_type:
@@ -1602,14 +1600,15 @@ def teacher_answers(request):
         start_no = (page_obj.number - 1) * page_size + 1
         
         for idx, answer in enumerate(page_obj.object_list, start=start_no):
+            # Safe data extraction
             try:
                 username = answer.session.user.username if (answer.session and answer.session.user) else "Unknown"
             except:
                 username = "Unknown"
             
-            # ⭐⭐ GUNAKAN step_id SEBAGAI activity_id ⭐⭐
-            activity_name = answer.step_id or "-"
+            activity_name = answer.activity_id or answer.step_id or "-"
             
+            # Format tanggal dengan fallback
             try:
                 tanggal = answer.created_at.strftime("%Y-%m-%d %H:%M") if answer.created_at else "-"
             except:
@@ -1619,7 +1618,7 @@ def teacher_answers(request):
                 "no": idx,
                 "id": answer.id,
                 "nama_siswa": username,
-                "kegiatan": activity_name,  # ⭐⭐ step_id sebagai kegiatan ⭐⭐
+                "kegiatan": activity_name,
                 "jenis_pertanyaan": answer.answer_type or "essay",
                 "pertanyaan": answer.question_text or "-",
                 "jawaban_siswa": answer.answer_text or "-",
@@ -1890,9 +1889,7 @@ def teacher_answers(request):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def teacher_dashboard(request):
-    """
-    GET /api/teacher/dashboard/ - FIXED VERSION
-    """
+    """GET /api/teacher/dashboard/"""
     try:
         # Get all users
         users = User.objects.all().order_by('username')
@@ -1961,7 +1958,6 @@ def teacher_dashboard(request):
                     last_kegiatan = "-"
                     kegiatan_status = "not_started"
                 
-                # PERBAIKAN: Hapus completed_activities dari response
                 data_list.append({
                     "siswa": user.username,
                     "user_id": user.id,
@@ -2047,16 +2043,11 @@ def teacher_dashboard(request):
             }, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-        
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def teacher_student_detail(request, username):
-    """
-    GET /api/teacher/student/<username>/
-    
-    Mendapatkan detail lengkap progress seorang siswa
-    """
+    """GET /api/teacher/student/<username>/"""
     try:
         user = User.objects.get(username=username)
         
@@ -2137,158 +2128,248 @@ def teacher_student_detail(request, username):
             {"error": str(e)}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-    
 
-# Load environment variables
-load_dotenv()
+# ===== DEBUG & HEALTH ENDPOINTS =====
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def health_check(request):
+    """Health check endpoint dengan debugging detail"""
+    try:
+        # Test each system
+        gemini_test = False
+        if gemini_model:
+            try:
+                test_response = gemini_model.invoke("Test")
+                gemini_test = bool(test_response and hasattr(test_response, 'content'))
+            except:
+                gemini_test = False
+        
+        rag_test = False
+        if retriever:
+            try:
+                test_docs = retriever.get_relevant_documents("test")
+                rag_test = len(test_docs) > 0
+            except:
+                rag_test = False
+        
+        langgraph_test = bool(chatbot_app)
+        
+        systems_status = {
+            "rag_system": "✅ Ready" if rag_test else "❌ Failed",
+            "langgraph_chatbot": "✅ Ready" if langgraph_test else "❌ Failed",
+            "gemini_model": "✅ Ready" if gemini_test else "❌ Failed"
+        }
+        
+        api_key_info = {
+            "available": bool(API_KEY),
+            "length": len(API_KEY) if API_KEY else 0,
+            "starts_with": API_KEY[:10] + "..." if API_KEY else "N/A"
+        }
+        
+        # Check file existence
+        csv_exists = os.path.exists(CSV_PATH)
+        persist_exists = os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR)
+        
+        health_data = {
+            "status": "healthy" if all([gemini_test, rag_test, langgraph_test]) else "degraded",
+            "systems": systems_status,
+            "api_key": api_key_info,
+            "model": MODEL_NAME,
+            "files": {
+                "csv_exists": csv_exists,
+                "csv_path": CSV_PATH,
+                "persist_dir_exists": persist_exists,
+                "persist_dir": PERSIST_DIR
+            },
+            "timestamp": timezone.now().isoformat()
+        }
+        
+        return Response(health_data)
+        
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return Response({
+            "status": "error",
+            "message": f"Health check failed: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def debug_rag_status(request):
+    """Debug endpoint to check RAG system status"""
+    try:
+        status_info = {
+            "rag_system": "initialized" if retriever else "not_initialized",
+            "api_key_available": bool(API_KEY),
+            "csv_file_exists": os.path.exists(CSV_PATH),
+            "vectorstore_exists": os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR),
+            "csv_path": CSV_PATH,
+            "persist_dir": PERSIST_DIR,
+            "model": MODEL_NAME
+        }
+        
+        # Test retriever if available
+        if retriever:
+            try:
+                test_docs = retriever.get_relevant_documents("kimia hijau")
+                status_info["retriever_test"] = {
+                    "success": True,
+                    "documents_found": len(test_docs)
+                }
+            except Exception as e:
+                status_info["retriever_test"] = {
+                    "success": False,
+                    "error": str(e)
+                }
+        
+        return Response(status_info)
+        
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
-def verify_teacher_password(request):
-    """
-    POST /api/teacher/verify-password/
-    Body: { "password": "your_password" }
-    
-    Verifikasi password guru dari .env file
-    """
+def reload_rag_system(request):
+    """Endpoint to reload RAG system"""
     try:
-        input_password = request.data.get('password', '')
+        global retriever
+        retriever = initialize_rag_system()
         
-        # Ambil password dari .env
-        correct_password = os.getenv('TEACHER_PASSWORD', 'greenverse2024')
-        
-        if not input_password:
-            return Response(
-                {
-                    'success': False,
-                    'message': 'Password tidak boleh kosong'
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Verifikasi password
-        if input_password == correct_password:
-            return Response(
-                {
-                    'success': True,
-                    'message': 'Password benar'
-                },
-                status=status.HTTP_200_OK
-            )
+        if retriever:
+            return Response({
+                "status": "success", 
+                "message": "RAG system reloaded successfully"
+            })
         else:
-            return Response(
-                {
-                    'success': False,
-                    'message': 'Password salah'
-                },
-                status=status.HTTP_401_UNAUTHORIZED
-            )
+            return Response({
+                "status": "error", 
+                "message": "Failed to reload RAG system"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
     except Exception as e:
-        print(f"Error in verify_teacher_password: {str(e)}")
-        return Response(
-            {
-                'success': False,
-                'message': 'Terjadi kesalahan server'
-            },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-        
-import json
-import os
-from django.http import JsonResponse
-from django.conf import settings
+        logger.error(f"Error reloading RAG system: {e}")
+        return Response({
+            "status": "error", 
+            "message": f"Error reloading RAG system: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-def get_chat_flow(request):
-    """Mengembalikan chat flow configuration"""
-    try:
-        # Coba load dari database terlebih dahulu
-        from .models import ChatFlowConfig
-        active_flow = ChatFlowConfig.objects.filter(is_active=True).first()
-        
-        if active_flow:
-            return JsonResponse(active_flow.flow_data)
-        
-        # Fallback ke file JSON
-        chat_file_path = os.path.join(settings.BASE_DIR, 'data', 'chat.json')
-        with open(chat_file_path, 'r', encoding='utf-8') as file:
-            chat_data = json.load(file)
-        
-        return JsonResponse(chat_data)
-        
-    except Exception as e:
-        return JsonResponse(
-            {'error': f'Failed to load chat flow: {str(e)}'}, 
-            status=500
-        )
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def force_rag_reload(request):
+    """Alias for reload_rag_system for backward compatibility"""
+    return reload_rag_system(request)
 
-def get_session_overview(request, session_id):
-    """Mengembalikan overview session"""
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def reload_all_systems(request):
+    """Reload semua sistem sekaligus"""
     try:
-        from .models import ChatSession, ActivityProgress
+        status_report = initialize_all_systems()
         
-        session = ChatSession.objects.get(session_id=session_id)
+        success_count = sum(1 for status in status_report.values() if "Ready" in status)
+        total_systems = len(status_report)
         
-        # Get completed activities
-        completed_activities = ActivityProgress.objects.filter(
-            session=session, 
-            status='completed'
-        ).values_list('activity_id', flat=True)
-        
-        # Get visited activities (all activities that have progress)
-        visited_activities = ActivityProgress.objects.filter(
-            session=session
-        ).values_list('activity_id', flat=True)
-        
-        return JsonResponse({
-            'current_step': session.current_step,
-            'completed_activities': list(completed_activities),
-            'visited_activities': list(visited_activities),
-            'session_status': session.status
+        return Response({
+            "status": "success",
+            "message": f"Reloaded {success_count}/{total_systems} systems",
+            "systems_status": status_report
         })
         
-    except ChatSession.DoesNotExist:
-        return JsonResponse({'error': 'Session not found'}, status=404)
     except Exception as e:
-        return JsonResponse(
-            {'error': f'Failed to get session overview: {str(e)}'}, 
-            status=500
-        )
+        logger.error(f"Error reloading all systems: {e}")
+        return Response({
+            "status": "error",
+            "message": f"Error reloading systems: {str(e)}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+# ===== ACTIVITY HISTORY ENDPOINTS =====
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def get_activity_history(request, session_id, activity_id):
-    """Mengembalikan history pesan untuk activity tertentu"""
+    """Mendapatkan histori percakapan untuk activity tertentu"""
     try:
-        from .models import ChatSession, ChatMessage
+        session = ChatSession.objects.get(session_id=session_id, user=request.user)
         
-        session = ChatSession.objects.get(session_id=session_id)
         messages = ChatMessage.objects.filter(
             session=session,
-            activity_id=activity_id
-        ).order_by('timestamp', 'sequence_order')
+            step_id=activity_id
+        ).order_by('timestamp')
         
-        message_list = []
-        for msg in messages:
-            message_list.append({
-                'message_type': msg.message_type,
-                'message_text': msg.message_text,
-                'message_data': msg.message_data or {},
-                'timestamp': msg.timestamp.isoformat(),
-                'character': msg.character,
-                'step_id': msg.step_id
-            })
+        answers = UserAnswer.objects.filter(
+            session=session,
+            step_id=activity_id
+        ).order_by('created_at')
         
-        return JsonResponse({
-            'history': {
-                'messages': message_list
-            }
+        history = {
+            'messages': ChatMessageSerializer(messages, many=True).data,
+            'answers': UserAnswerSerializer(answers, many=True).data
+        }
+        
+        return Response({
+            'status': 'success',
+            'session_id': session_id,
+            'activity_id': activity_id,
+            'history': history
         })
         
     except ChatSession.DoesNotExist:
-        return JsonResponse({'error': 'Session not found'}, status=404)
+        return Response({
+            'status': 'error',
+            'message': 'Sesi tidak ditemukan'
+        }, status=status.HTTP_404_NOT_FOUND)
     except Exception as e:
-        return JsonResponse(
-            {'error': f'Failed to get activity history: {str(e)}'}, 
-            status=500
-        )
+        logger.error(f"Error getting activity history: {e}")
+        return Response({
+            'status': 'error',
+            'message': 'Gagal mengambil histori'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_session_overview(request, session_id):
+    """Mendapatkan overview seluruh sesi"""
+    try:
+        session = ChatSession.objects.get(session_id=session_id, user=request.user)
         
+        activities = [
+            'intro', 'kimia_hijau', 'pre_kegiatan', 
+            'kegiatan_1', 'kegiatan_2', 'kegiatan_3', 'kegiatan_4',
+            'kegiatan_5', 'kegiatan_6', 'kegiatan_7', 'completion'
+        ]
         
+        overview = {}
+        for activity in activities:
+            messages_count = ChatMessage.objects.filter(
+                session=session, step_id=activity
+            ).count()
+            
+            answers_count = UserAnswer.objects.filter(
+                session=session, step_id=activity
+            ).count()
+            
+            try:
+                activity_progress = ActivityProgress.objects.get(
+                    session=session, activity_id=activity
+                )
+                status = activity_progress.status
+            except ActivityProgress.DoesNotExist:
+                status = 'not_started'
+            
+            overview[activity] = {
+                'messages_count': messages_count,
+                'answers_count': answers_count,
+                'status': status
+            }
+        
+        return Response({
+            'status': 'success',
+            'overview': overview
+        })
+        
+    except ChatSession.DoesNotExist:
+        return Response({
+            'status': 'error',
+            'message': 'Sesi tidak ditemukan'
+        }, status=status.HTTP_404_NOT_FOUND)
