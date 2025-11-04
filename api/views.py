@@ -391,6 +391,24 @@ def create_fallback_retriever():
         logger.error(f"Error creating fallback retriever: {e}")
         return None
 
+
+import pytz
+
+def format_datetime_wib(dt):
+    """Convert datetime to WIB timezone and format"""
+    if not dt:
+        return "-"
+    
+    # Ensure dt is timezone-aware
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt, timezone.utc)
+    
+    # Convert to WIB (UTC+7)
+    wib = pytz.timezone('Asia/Jakarta')
+    dt_wib = dt.astimezone(wib)
+    
+    return dt_wib.strftime("%Y-%m-%d %H:%M")
+
 def initialize_rag_system():
     """Initialize the RAG system with enhanced error handling"""
     global retriever
@@ -1608,7 +1626,7 @@ def teacher_answers(request):
                 "image_url": answer.image_url or None,
                 "tipe_jawaban": answer.answer_type or "essay",
                 "status": "Submitted" if answer.is_submitted else "Draft",
-                "tanggal_dikirim": tanggal,
+                "tanggal_dikirim": format_datetime_wib(answer.created_at),
             })
 
         # Metadata
@@ -1832,7 +1850,7 @@ def teacher_answers(request):
                 "image_url": answer.image_url or None,  # Untuk jawaban yang ada gambar
                 "tipe_jawaban": answer.answer_type or "essay",
                 "status": "Submitted" if answer.is_submitted else "Draft",
-                "tanggal_dikirim": tanggal,
+                "tanggal_dikirim": format_datetime_wib(answer.created_at),
             })
 
         # Metadata
@@ -1963,11 +1981,7 @@ def teacher_dashboard(request):
                     "jawaban_terkumpul": total_answers,
                     
                     # Timestamp
-                    "terakhir_aktif": (
-                        chat_session.updated_at.strftime("%Y-%m-%d %H:%M")
-                        if chat_session and chat_session.updated_at
-                        else "-"
-                    )
+                    "terakhir_aktif": format_datetime_wib(chat_session.updated_at),
                 })
                 
             except Exception as e:
