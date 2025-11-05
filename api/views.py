@@ -42,38 +42,17 @@ from langgraph.graph.message import add_messages
 # Setup logging
 logger = logging.getLogger(__name__)
 
-# Load environment variables - PERBAIKAN: Load dari root directory
+# Load environment variables
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 env_path = os.path.join(BASE_DIR, '.env')
 load_dotenv(env_path)
 
-# Configuration untuk chatbot - PATH DIPERBAIKI
+# Configuration untuk chatbot
 CSV_PATH = os.path.join(BASE_DIR, "data/data.csv")
 PERSIST_DIR = os.path.join(BASE_DIR, "chroma_db")
 
-# PERBAIKAN: Debug environment variables
-print(f"=== DEBUG: Current directory: {os.getcwd()} ===")
-print(f"=== DEBUG: BASE_DIR: {BASE_DIR} ===")
-print(f"=== DEBUG: CSV_PATH: {CSV_PATH} ===")
-print(f"=== DEBUG: PERSIST_DIR: {PERSIST_DIR} ===")
-print(f"=== DEBUG: .env path: {env_path} ===")
-print(f"=== DEBUG: .env exists: {os.path.exists(env_path)} ===")
-
-# Load API key dengan multiple fallbacks
+# Load API key
 API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-
-# Debugging detail untuk API key
-print(f"=== DEBUG: GEMINI_API_KEY loaded: {'YES' if API_KEY else 'NO'} ===")
-if API_KEY:
-    print(f"=== DEBUG: API Key length: {len(API_KEY)} ===")
-    print(f"=== DEBUG: API Key starts with: {API_KEY[:10]}... ===")
-    print(f"=== DEBUG: API Key ends with: ...{API_KEY[-4:]} ===")
-else:
-    print("=== DEBUG: API Key is EMPTY ===")
-    # Tampilkan semua environment variables yang tersedia
-    all_env_vars = {k: v for k, v in os.environ.items() if 'API' in k or 'KEY' in k}
-    print(f"=== DEBUG: Available API/KEY env vars: {all_env_vars} ===")
-
 MODEL_NAME = "gemini-2.0-flash-lite"  
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
@@ -84,7 +63,7 @@ retriever = None
 gemini_model = None
 chatbot_app = None
 
-# Data struktur chatbot dari file JSON Anda
+# ===== CHATBOT FLOW CONFIGURATION =====
 CHATBOT_FLOW = {
     "intro": {
         "id": "intro",
@@ -305,7 +284,7 @@ def initialize_gemini_model():
     except Exception as e:
         logger.error(f"❌ Error initializing Gemini model: {e}")
         return None    
-
+        
 # ===== LANGGRAPH CHATBOT SYSTEM =====
 
 class ChatState(TypedDict):
@@ -434,7 +413,7 @@ JAWABAN (gunakan bahasa Indonesia yang jelas dan membantu):
         logger.error(f"Error creating LangGraph chatbot: {e}")
         return None
 
-# ===== RAG SYSTEM YANG DIPERBAIKI =====
+# ===== RAG SYSTEM =====
 
 def create_fallback_retriever():
     """Create a fallback retriever tanpa sentence-transformers"""
@@ -564,7 +543,7 @@ Category: {row.get('category', '')}
         
     except Exception as e:
         logger.error(f"Error creating simple CSV retriever: {e}")
-        return create_fallback_retriever()
+        return None
     
 def initialize_rag_system():
     """Initialize the RAG system - menggunakan simple retriever untuk reliability"""
@@ -632,6 +611,9 @@ def create_fallback_csv():
     except Exception as e:
         logger.error(f"Error creating fallback CSV: {e}")
         
+    
+
+
 def initialize_all_systems():
     """Initialize semua sistem sekaligus dengan error handling yang lebih baik"""
     global gemini_model, chatbot_app, retriever
@@ -682,6 +664,10 @@ try:
     initialize_all_systems()
 except Exception as e:
     logger.error(f"Failed to initialize systems: {e}")
+    
+    
+# Initialize semua sistem
+initialize_all_systems()
 
 # ===== VIEWS UTAMA =====
 
