@@ -1,3 +1,5 @@
+# (File: backend/settings.py)
+
 from pathlib import Path
 from datetime import timedelta
 import os
@@ -28,7 +30,7 @@ ALLOWED_HOSTS = [
 # ----------------------------------------------------
 INSTALLED_APPS = [
     'rest_framework',
-    'corsheaders',
+    'corsheaders',  # <--- Pastikan corsheaders di atas
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -40,16 +42,11 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
 ]
 
-# SIMPLE_JWT = {
-#     'BLACKLIST_AFTER_ROTATION': True,
-#     'ROTATE_REFRESH_TOKENS': True,
-# }
-
 # ----------------------------------------------------
 # ⚙️ Middleware
 # ----------------------------------------------------
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # <--- Harus di paling atas
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',  # <– penting untuk static di Railway
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -96,9 +93,6 @@ DATABASES = {
 # ----------------------------------------------------
 # 🔑 Auth & JWT
 # ----------------------------------------------------
-# ----------------------------------------------------
-# 🔑 Auth & JWT
-# ----------------------------------------------------
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
@@ -119,9 +113,28 @@ SIMPLE_JWT = {
 # ----------------------------------------------------
 # 🌐 CORS (untuk frontend React)
 # ----------------------------------------------------
-CORS_ALLOW_ALL_ORIGINS = True
+
+# Hapus atau komentari 'CORS_ALLOW_ALL_ORIGINS = True'
+# CORS_ALLOW_ALL_ORIGINS = True 
+
+# Gunakan setting yang lebih spesifik untuk produksi
+CORS_ALLOWED_ORIGINS = [
+    "https://greenverse.up.railway.app", # <-- Origin frontend Anda
+    "http://localhost:3000",             # <-- Untuk development React lokal
+    "http://localhost:5173",             # <-- Untuk development Vite lokal
+]
+
+# Tambahkan ini untuk mengizinkan frontend mengirim header/cookie
+CORS_ALLOW_CREDENTIALS = True
+
+# Izinkan header 'Authorization'
 from corsheaders.defaults import default_headers
 CORS_ALLOW_HEADERS = list(default_headers) + ["Authorization"]
+
+# Percayai origin frontend untuk request POST (penting untuk keamanan)
+CSRF_TRUSTED_ORIGINS = [
+    "https://greenverse.up.railway.app",
+]
 
 # ----------------------------------------------------
 # 🌍 Internasionalisasi
