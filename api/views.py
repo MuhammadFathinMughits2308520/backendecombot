@@ -1,3 +1,5 @@
+# (File: api/views.py)
+
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from django.contrib.auth.models import User
@@ -537,7 +539,7 @@ Category: {row.get('category', '')}
         logger.info(f"🧪 Test retrieval for '{test_query}': Found {len(test_docs)} docs")
         
         for i, doc in enumerate(test_docs):
-            logger.info(f"   Test Doc {i+1}: {doc.page_content[:100]}...")
+            logger.info(f"    Test Doc {i+1}: {doc.page_content[:100]}...")
         
         return retriever
         
@@ -565,7 +567,7 @@ def initialize_rag_system():
         logger.error(f"❌ Error initializing RAG system: {e}")
         return create_fallback_retriever()
             
-    
+        
 def create_fallback_csv():
     """Create a fallback CSV file with basic data"""
     try:
@@ -666,9 +668,6 @@ except Exception as e:
     logger.error(f"Failed to initialize systems: {e}")
     
     
-# Initialize semua sistem
-initialize_all_systems()
-
 # ===== VIEWS UTAMA =====
 
 @api_view(['POST'])
@@ -852,20 +851,45 @@ def comic_mark_finish(request):
             status=status.HTTP_403_FORBIDDEN
         )
 
+# ==========================================================
+# ===== PERUBAHAN DIMULAI DI SINI (views.py) =====
+# ==========================================================
 @api_view(['POST', 'GET'])
 @permission_classes([AllowAny])
 def feedback_view(request):
     if request.method == 'POST':
-        serializer = FeedbackSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({'message': 'Feedback berhasil dikirim!'}, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            serializer = FeedbackSerializer(data=request.data)
+            if serializer.is_valid():
+                serializer.save()
+                return Response({'message': 'Feedback berhasil dikirim!'}, status=status.HTTP_201_CREATED)
+            # Jika serializer tidak valid, kirim error 400
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            # Tangkap semua error (termasuk OperationalError jika tabel tidak ada)
+            logger.error(f"Error in feedback_view POST: {str(e)}")
+            # Kirim respons JSON 500 yang valid
+            return Response(
+                {"error": "Terjadi kesalahan internal saat memproses feedback.", "detail": str(e)}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     elif request.method == 'GET':
-        feedbacks = Feedback.objects.all().order_by('-tanggal')
-        serializer = FeedbackSerializer(feedbacks, many=True)
-        return Response(serializer.data)
+        try:
+            feedbacks = Feedback.objects.all().order_by('-tanggal')
+            serializer = FeedbackSerializer(feedbacks, many=True)
+            return Response(serializer.data)
+        except Exception as e:
+            # Tangkap error saat GET
+            logger.error(f"Error in feedback_view GET: {str(e)}")
+            return Response(
+                {"error": "Terjadi kesalahan internal saat mengambil feedback.", "detail": str(e)}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+# ==========================================================
+# ===== PERUBAHAN SELESAI DI SINI (views.py) =====
+# ==========================================================
+
 
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1122,9 +1146,9 @@ def ask_question(request):
                 
                 # LOG DETAIL SETIAP DOKUMEN YANG DITEMUKAN
                 for i, doc in enumerate(docs):
-                    logger.info(f"   📝 Doc {i+1} Content: {doc.page_content}")
-                    logger.info(f"   🏷️  Doc {i+1} Metadata: {doc.metadata}")
-                    logger.info("   " + "-" * 50)
+                    logger.info(f"    📝 Doc {i+1} Content: {doc.page_content}")
+                    logger.info(f"    🏷️  Doc {i+1} Metadata: {doc.metadata}")
+                    logger.info("    " + "-" * 50)
                 
                 context = "\n\n".join([f"Dokumen {i+1}:\n{d.page_content}" for i, d in enumerate(docs)])
                 relevant_docs = docs
@@ -1353,7 +1377,7 @@ def complete_activity(request):
             return Response({
                 'status': 'error',
                 'message': 'Sesi tidak ditemukan'
-            }, status=status.HTTP_404_NOT_FOUND)
+            }, status=status.HTTP_44_NOT_FOUND)
         
         # Tandai activity sebagai selesai
         activity_progress, created = ActivityProgress.objects.get_or_create(
@@ -2060,3 +2084,6 @@ def get_session_overview(request, session_id):
             'status': 'error',
             'message': 'Sesi tidak ditemukan'
         }, status=status.HTTP_404_NOT_FOUND)
+
+# Hapus pemanggilan ganda di akhir file. Pemanggilan pertama sudah cukup.
+# initialize_all_systems()
