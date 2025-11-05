@@ -564,7 +564,7 @@ Category: {row.get('category', '')}
         
     except Exception as e:
         logger.error(f"Error creating simple CSV retriever: {e}")
-        return None
+        return create_fallback_retriever()
     
 def initialize_rag_system():
     """Initialize the RAG system - menggunakan simple retriever untuk reliability"""
