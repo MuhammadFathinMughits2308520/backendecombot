@@ -1,5 +1,3 @@
-# (File: api/views.py)
-
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from django.contrib.auth.models import User
@@ -44,17 +42,38 @@ from langgraph.graph.message import add_messages
 # Setup logging
 logger = logging.getLogger(__name__)
 
-# Load environment variables
+# Load environment variables - PERBAIKAN: Load dari root directory
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 env_path = os.path.join(BASE_DIR, '.env')
 load_dotenv(env_path)
 
-# Configuration untuk chatbot
+# Configuration untuk chatbot - PATH DIPERBAIKI
 CSV_PATH = os.path.join(BASE_DIR, "data/data.csv")
 PERSIST_DIR = os.path.join(BASE_DIR, "chroma_db")
 
-# Load API key
+# PERBAIKAN: Debug environment variables
+print(f"=== DEBUG: Current directory: {os.getcwd()} ===")
+print(f"=== DEBUG: BASE_DIR: {BASE_DIR} ===")
+print(f"=== DEBUG: CSV_PATH: {CSV_PATH} ===")
+print(f"=== DEBUG: PERSIST_DIR: {PERSIST_DIR} ===")
+print(f"=== DEBUG: .env path: {env_path} ===")
+print(f"=== DEBUG: .env exists: {os.path.exists(env_path)} ===")
+
+# Load API key dengan multiple fallbacks
 API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+# Debugging detail untuk API key
+print(f"=== DEBUG: GEMINI_API_KEY loaded: {'YES' if API_KEY else 'NO'} ===")
+if API_KEY:
+    print(f"=== DEBUG: API Key length: {len(API_KEY)} ===")
+    print(f"=== DEBUG: API Key starts with: {API_KEY[:10]}... ===")
+    print(f"=== DEBUG: API Key ends with: ...{API_KEY[-4:]} ===")
+else:
+    print("=== DEBUG: API Key is EMPTY ===")
+    # Tampilkan semua environment variables yang tersedia
+    all_env_vars = {k: v for k, v in os.environ.items() if 'API' in k or 'KEY' in k}
+    print(f"=== DEBUG: Available API/KEY env vars: {all_env_vars} ===")
+
 MODEL_NAME = "gemini-2.0-flash-lite"  
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
@@ -65,7 +84,7 @@ retriever = None
 gemini_model = None
 chatbot_app = None
 
-# ===== CHATBOT FLOW CONFIGURATION =====
+# Data struktur chatbot dari file JSON Anda
 CHATBOT_FLOW = {
     "intro": {
         "id": "intro",
@@ -286,7 +305,7 @@ def initialize_gemini_model():
     except Exception as e:
         logger.error(f"❌ Error initializing Gemini model: {e}")
         return None    
-        
+
 # ===== LANGGRAPH CHATBOT SYSTEM =====
 
 class ChatState(TypedDict):
@@ -415,7 +434,7 @@ JAWABAN (gunakan bahasa Indonesia yang jelas dan membantu):
         logger.error(f"Error creating LangGraph chatbot: {e}")
         return None
 
-# ===== RAG SYSTEM =====
+# ===== RAG SYSTEM YANG DIPERBAIKI =====
 
 def create_fallback_retriever():
     """Create a fallback retriever tanpa sentence-transformers"""
@@ -539,7 +558,7 @@ Category: {row.get('category', '')}
         logger.info(f"🧪 Test retrieval for '{test_query}': Found {len(test_docs)} docs")
         
         for i, doc in enumerate(test_docs):
-            logger.info(f"    Test Doc {i+1}: {doc.page_content[:100]}...")
+            logger.info(f"   Test Doc {i+1}: {doc.page_content[:100]}...")
         
         return retriever
         
@@ -567,7 +586,7 @@ def initialize_rag_system():
         logger.error(f"❌ Error initializing RAG system: {e}")
         return create_fallback_retriever()
             
-        
+    
 def create_fallback_csv():
     """Create a fallback CSV file with basic data"""
     try:
@@ -613,9 +632,6 @@ def create_fallback_csv():
     except Exception as e:
         logger.error(f"Error creating fallback CSV: {e}")
         
-    
-
-
 def initialize_all_systems():
     """Initialize semua sistem sekaligus dengan error handling yang lebih baik"""
     global gemini_model, chatbot_app, retriever
@@ -666,8 +682,7 @@ try:
     initialize_all_systems()
 except Exception as e:
     logger.error(f"Failed to initialize systems: {e}")
-    
-    
+
 # ===== VIEWS UTAMA =====
 
 @api_view(['POST'])
@@ -851,45 +866,20 @@ def comic_mark_finish(request):
             status=status.HTTP_403_FORBIDDEN
         )
 
-# ==========================================================
-# ===== PERUBAHAN DIMULAI DI SINI (views.py) =====
-# ==========================================================
 @api_view(['POST', 'GET'])
 @permission_classes([AllowAny])
 def feedback_view(request):
     if request.method == 'POST':
-        try:
-            serializer = FeedbackSerializer(data=request.data)
-            if serializer.is_valid():
-                serializer.save()
-                return Response({'message': 'Feedback berhasil dikirim!'}, status=status.HTTP_201_CREATED)
-            # Jika serializer tidak valid, kirim error 400
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            # Tangkap semua error (termasuk OperationalError jika tabel tidak ada)
-            logger.error(f"Error in feedback_view POST: {str(e)}")
-            # Kirim respons JSON 500 yang valid
-            return Response(
-                {"error": "Terjadi kesalahan internal saat memproses feedback.", "detail": str(e)}, 
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        serializer = FeedbackSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({'message': 'Feedback berhasil dikirim!'}, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     elif request.method == 'GET':
-        try:
-            feedbacks = Feedback.objects.all().order_by('-tanggal')
-            serializer = FeedbackSerializer(feedbacks, many=True)
-            return Response(serializer.data)
-        except Exception as e:
-            # Tangkap error saat GET
-            logger.error(f"Error in feedback_view GET: {str(e)}")
-            return Response(
-                {"error": "Terjadi kesalahan internal saat mengambil feedback.", "detail": str(e)}, 
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-# ==========================================================
-# ===== PERUBAHAN SELESAI DI SINI (views.py) =====
-# ==========================================================
-
+        feedbacks = Feedback.objects.all().order_by('-tanggal')
+        serializer = FeedbackSerializer(feedbacks, many=True)
+        return Response(serializer.data)
 
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1146,9 +1136,9 @@ def ask_question(request):
                 
                 # LOG DETAIL SETIAP DOKUMEN YANG DITEMUKAN
                 for i, doc in enumerate(docs):
-                    logger.info(f"    📝 Doc {i+1} Content: {doc.page_content}")
-                    logger.info(f"    🏷️  Doc {i+1} Metadata: {doc.metadata}")
-                    logger.info("    " + "-" * 50)
+                    logger.info(f"   📝 Doc {i+1} Content: {doc.page_content}")
+                    logger.info(f"   🏷️  Doc {i+1} Metadata: {doc.metadata}")
+                    logger.info("   " + "-" * 50)
                 
                 context = "\n\n".join([f"Dokumen {i+1}:\n{d.page_content}" for i, d in enumerate(docs)])
                 relevant_docs = docs
@@ -1377,7 +1367,7 @@ def complete_activity(request):
             return Response({
                 'status': 'error',
                 'message': 'Sesi tidak ditemukan'
-            }, status=status.HTTP_44_NOT_FOUND)
+            }, status=status.HTTP_404_NOT_FOUND)
         
         # Tandai activity sebagai selesai
         activity_progress, created = ActivityProgress.objects.get_or_create(
@@ -2084,6 +2074,3 @@ def get_session_overview(request, session_id):
             'status': 'error',
             'message': 'Sesi tidak ditemukan'
         }, status=status.HTTP_404_NOT_FOUND)
-
-# Hapus pemanggilan ganda di akhir file. Pemanggilan pertama sudah cukup.
-# initialize_all_systems()
