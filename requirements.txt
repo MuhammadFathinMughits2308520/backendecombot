@@ -59,5 +59,4 @@ sentence-transformers==2.2.2
 transformers==4.30.2
 requests==2.31.0
 
-langgraph==0.2.60
-langgraph-checkpoint==2.0.20
+langgraph==0.0.3
