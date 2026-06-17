@@ -14,6 +14,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.utils import timezone
+from django.db import IntegrityError
 
 # ===== IMPORT UNTUK CHATBOT DENGAN LANGGRAPH =====
 import sys
@@ -901,15 +902,42 @@ def send_chat_message(request):
         session_id = request.data.get('session_id')
         activity_id = request.data.get('activity_id', 'intro')
         
-        # Buat atau dapatkan session
-        session, created = ChatSession.objects.get_or_create(
-            user=request.user,
-            session_id=session_id,
-            defaults={
-                'current_step': activity_id,
-                'status': 'active'
-            }
-        )
+        
+        
+        try:
+            # 1. Coba cari sesi berdasarkan session_id saja
+            session = ChatSession.objects.get(session_id=session_id)
+            
+            # 2. Pastikan sesi ini milik user yang sedang login
+            if session.user != request.user:
+                # Jika frontend mengirim ID milik akun lain (karena cache browser),
+                # kita abaikan ID lama dan buat ID baru yang unik untuk user ini.
+                import uuid
+                new_session_id = f"session_{request.user.id}_{uuid.uuid4().hex[:8]}"
+                session = ChatSession.objects.create(
+                    user=request.user,
+                    session_id=new_session_id,
+                    current_step=activity_id,
+                    status='active'
+                )
+                created = True
+            else:
+                created = False
+                
+        except ChatSession.DoesNotExist:
+            # 3. Jika sesi belum ada, buat baru
+            try:
+                session = ChatSession.objects.create(
+                    user=request.user,
+                    session_id=session_id,
+                    current_step=activity_id,
+                    status='active'
+                )
+                created = True
+            except IntegrityError:
+                # Proteksi ekstra jika ada 'race condition' (diklik 2x sangat cepat)
+                session = ChatSession.objects.get(session_id=session_id)
+                created = False
         
         # Jika session baru, inisialisasi di LangGraph
         if created and chatbot_app:
