@@ -893,7 +893,6 @@ class LogoutView(APIView):
 def send_chat_message(request):
     """Mengirim pesan dan mendapatkan respons menggunakan LangGraph"""
     
-    # ✅ PERBAIKAN: Lazy Initialization
     global chatbot_app, gemini_model
     if chatbot_app is None or gemini_model is None:
         initialize_all_systems()
@@ -1012,7 +1011,7 @@ JAWABAN (gunakan bahasa Indonesia yang jelas dan membantu):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def send_chat_message(request):
+def start_chat_session(request):
     """Mengirim pesan dan mendapatkan respons menggunakan LangGraph"""
     try:
         session_id = request.data.get('session_id')
