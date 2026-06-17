@@ -890,30 +890,32 @@ class LogoutView(APIView):
             return Response({"detail": "Token tidak valid atau sudah kadaluarsa"}, status=status.HTTP_400_BAD_REQUEST)
 
 # ===== CHATBOT VIEWS DENGAN LANGGRAPH =====
+
+import uuid
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def send_chat_message(request):
-    """Mengirim pesan dan mendapatkan respons menggunakan LangGraph"""
-    
+def start_chat_session(request):
+    """Memulai sesi chat baru dengan LangGraph"""
     global chatbot_app, gemini_model
     if chatbot_app is None or gemini_model is None:
         initialize_all_systems()
 
     try:
+        # Dapatkan session_id dari frontend, atau buat baru jika kosong
         session_id = request.data.get('session_id')
+        if not session_id:
+            session_id = f"session_{request.user.id}_{uuid.uuid4().hex[:8]}"
+            
         activity_id = request.data.get('activity_id', 'intro')
         
-        
-        
         try:
-            # 1. Coba cari sesi berdasarkan session_id saja
+            # 1. Coba cari sesi berdasarkan session_id
             session = ChatSession.objects.get(session_id=session_id)
             
             # 2. Pastikan sesi ini milik user yang sedang login
             if session.user != request.user:
-                # Jika frontend mengirim ID milik akun lain (karena cache browser),
-                # kita abaikan ID lama dan buat ID baru yang unik untuk user ini.
-                import uuid
+                # Jika milik orang lain (karena cache), buat ID baru
                 new_session_id = f"session_{request.user.id}_{uuid.uuid4().hex[:8]}"
                 session = ChatSession.objects.create(
                     user=request.user,
@@ -936,13 +938,13 @@ def send_chat_message(request):
                 )
                 created = True
             except IntegrityError:
-                # Proteksi ekstra jika ada 'race condition' (diklik 2x sangat cepat)
+                # Proteksi ekstra jika ada race condition
                 session = ChatSession.objects.get(session_id=session_id)
                 created = False
-        
-        # Jika session baru, inisialisasi di LangGraph
+
+        # Jika session baru, inisialisasi pesan pembuka
         if created and chatbot_app:
-            config = {"configurable": {"thread_id": session_id}}
+            config = {"configurable": {"thread_id": session.session_id}}
             
             # Buat pesan pembuka
             opening_message = "Halo! 👋 Saya Aquano, asisten pembelajaran Ecombot. Saya siap membantu Anda menjelajahi dunia Kimia Hijau dan Tradisi Mapag Hujan. Ada yang bisa saya bantu hari ini?"
@@ -978,6 +980,7 @@ def send_chat_message(request):
             'status': 'error',
             'message': 'Gagal memulai sesi chat'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 def send_chat_message_fallback(session, message_text, activity_id):
     """Fallback method jika LangGraph tidak tersedia"""
@@ -1038,10 +1041,15 @@ JAWABAN (gunakan bahasa Indonesia yang jelas dan membantu):
             'message': 'Gagal memproses pesan'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def start_chat_session(request):
+def send_chat_message(request):
     """Mengirim pesan dan mendapatkan respons menggunakan LangGraph"""
+    global chatbot_app, gemini_model
+    if chatbot_app is None or gemini_model is None:
+        initialize_all_systems()
+
     try:
         session_id = request.data.get('session_id')
         message_text = request.data.get('message_text')
@@ -1059,7 +1067,7 @@ def start_chat_session(request):
         except ChatSession.DoesNotExist:
             return Response({
                 'status': 'error',
-                'message': 'Sesi tidak ditemukan'
+                'message': 'Sesi tidak ditemukan atau milik pengguna lain'
             }, status=status.HTTP_404_NOT_FOUND)
         
         # Simpan pesan user ke database
@@ -1132,7 +1140,8 @@ def start_chat_session(request):
             'status': 'error',
             'message': 'Gagal mengirim pesan'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+        
+        
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def ask_question(request):
@@ -1228,8 +1237,7 @@ JAWABAN (gunakan bahasa Indonesia yang jelas dan informatif. Jika tidak tahu jaw
         return Response(
             {"answer": "Maaf, terjadi kesalahan sistem. Silakan coba lagi dalam beberapa saat."}, 
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-        
+        )        
         
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
