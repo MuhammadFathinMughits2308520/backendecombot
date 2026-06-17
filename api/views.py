@@ -289,22 +289,13 @@ def initialize_gemini_model():
             timeout=30
         )
         
-        # Test the model dengan prompt sederhana
-        try:
-            test_response = model.invoke("Hello, test connection")
-            if test_response and hasattr(test_response, 'content'):
-                logger.info("✅ Gemini model initialized dan tested successfully")
-                return model
-            else:
-                logger.error("❌ Gemini model test failed - no response content")
-                return None
-        except Exception as test_error:
-            logger.error(f"❌ Gemini model test failed: {test_error}")
-            return None
+        # ✅ PERBAIKAN: Langsung return model tanpa melakukan .invoke() di awal
+        logger.info("✅ Gemini model initialized successfully")
+        return model
             
     except Exception as e:
         logger.error(f"❌ Error initializing Gemini model: {e}")
-        return None    
+        return None
 
 # ===== LANGGRAPH CHATBOT SYSTEM =====
 
@@ -897,13 +888,18 @@ class LogoutView(APIView):
             return Response({"detail": "Token tidak valid atau sudah kadaluarsa"}, status=status.HTTP_400_BAD_REQUEST)
 
 # ===== CHATBOT VIEWS DENGAN LANGGRAPH =====
-
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def start_chat_session(request):
-    """Memulai sesi chat baru dengan LangGraph"""
+def send_chat_message(request):
+    """Mengirim pesan dan mendapatkan respons menggunakan LangGraph"""
+    
+    # ✅ PERBAIKAN: Lazy Initialization
+    global chatbot_app, gemini_model
+    if chatbot_app is None or gemini_model is None:
+        initialize_all_systems()
+
     try:
-        session_id = request.data.get('session_id', f"session_{timezone.now().strftime('%Y%m%d_%H%M%S')}")
+        session_id = request.data.get('session_id')
         activity_id = request.data.get('activity_id', 'intro')
         
         # Buat atau dapatkan session
