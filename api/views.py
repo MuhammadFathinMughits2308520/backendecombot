@@ -670,11 +670,6 @@ def initialize_all_systems():
     logger.info(f"System Status: {status_report}")
     return status_report
 
-# Panggil initialization dengan error handling
-try:
-    initialize_all_systems()
-except Exception as e:
-    logger.error(f"Failed to initialize systems: {e}")
 
 # ===== VIEWS UTAMA =====
 
@@ -1146,6 +1141,12 @@ def send_chat_message(request):
 @permission_classes([AllowAny])
 def ask_question(request):
     """Handle question asking dengan RAG system atau fallback"""
+    # ------------------ TAMBAHKAN BAGIAN INI ------------------
+    global retriever, gemini_model
+    if retriever is None or gemini_model is None:
+        initialize_all_systems()
+    # ----------------------------------------------------------
+
     try:
         question = request.data.get('question', '').strip()
         
@@ -1154,7 +1155,7 @@ def ask_question(request):
                 {"answer": "Silakan ajukan pertanyaan yang lebih spesifik."}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+            
         logger.info(f"🔍 Processing question: '{question}'")
         
         # Get relevant documents from RAG system atau fallback
