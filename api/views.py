@@ -15,6 +15,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from django.utils import timezone
 from django.db import IntegrityError
+import uuid
 
 # ===== IMPORT UNTUK CHATBOT DENGAN LANGGRAPH =====
 import sys
@@ -889,30 +890,32 @@ class LogoutView(APIView):
             return Response({"detail": "Token tidak valid atau sudah kadaluarsa"}, status=status.HTTP_400_BAD_REQUEST)
 
 # ===== CHATBOT VIEWS DENGAN LANGGRAPH =====
+
+import uuid
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def send_chat_message(request):
-    """Mengirim pesan dan mendapatkan respons menggunakan LangGraph"""
-    
+def start_chat_session(request):
+    """Memulai sesi chat baru dengan LangGraph"""
     global chatbot_app, gemini_model
     if chatbot_app is None or gemini_model is None:
         initialize_all_systems()
 
     try:
+        # Dapatkan session_id dari frontend, atau buat baru jika kosong
         session_id = request.data.get('session_id')
+        if not session_id:
+            session_id = f"session_{request.user.id}_{uuid.uuid4().hex[:8]}"
+            
         activity_id = request.data.get('activity_id', 'intro')
         
-        
-        
         try:
-            # 1. Coba cari sesi berdasarkan session_id saja
+            # 1. Coba cari sesi berdasarkan session_id
             session = ChatSession.objects.get(session_id=session_id)
             
             # 2. Pastikan sesi ini milik user yang sedang login
             if session.user != request.user:
-                # Jika frontend mengirim ID milik akun lain (karena cache browser),
-                # kita abaikan ID lama dan buat ID baru yang unik untuk user ini.
-                import uuid
+                # Jika milik orang lain (karena cache), buat ID baru
                 new_session_id = f"session_{request.user.id}_{uuid.uuid4().hex[:8]}"
                 session = ChatSession.objects.create(
                     user=request.user,
@@ -935,13 +938,13 @@ def send_chat_message(request):
                 )
                 created = True
             except IntegrityError:
-                # Proteksi ekstra jika ada 'race condition' (diklik 2x sangat cepat)
+                # Proteksi ekstra jika ada race condition
                 session = ChatSession.objects.get(session_id=session_id)
                 created = False
-        
-        # Jika session baru, inisialisasi di LangGraph
+
+        # Jika session baru, inisialisasi pesan pembuka
         if created and chatbot_app:
-            config = {"configurable": {"thread_id": session_id}}
+            config = {"configurable": {"thread_id": session.session_id}}
             
             # Buat pesan pembuka
             opening_message = "Halo! 👋 Saya Aquano, asisten pembelajaran Ecombot. Saya siap membantu Anda menjelajahi dunia Kimia Hijau dan Tradisi Mapag Hujan. Ada yang bisa saya bantu hari ini?"
@@ -977,6 +980,7 @@ def send_chat_message(request):
             'status': 'error',
             'message': 'Gagal memulai sesi chat'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 def send_chat_message_fallback(session, message_text, activity_id):
     """Fallback method jika LangGraph tidak tersedia"""
@@ -1037,10 +1041,15 @@ JAWABAN (gunakan bahasa Indonesia yang jelas dan membantu):
             'message': 'Gagal memproses pesan'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def start_chat_session(request):
+def send_chat_message(request):
     """Mengirim pesan dan mendapatkan respons menggunakan LangGraph"""
+    global chatbot_app, gemini_model
+    if chatbot_app is None or gemini_model is None:
+        initialize_all_systems()
+
     try:
         session_id = request.data.get('session_id')
         message_text = request.data.get('message_text')
@@ -1058,7 +1067,7 @@ def start_chat_session(request):
         except ChatSession.DoesNotExist:
             return Response({
                 'status': 'error',
-                'message': 'Sesi tidak ditemukan'
+                'message': 'Sesi tidak ditemukan atau milik pengguna lain'
             }, status=status.HTTP_404_NOT_FOUND)
         
         # Simpan pesan user ke database
@@ -1130,105 +1139,7 @@ def start_chat_session(request):
         return Response({
             'status': 'error',
             'message': 'Gagal mengirim pesan'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def ask_question(request):
-    """Handle question asking dengan RAG system atau fallback"""
-    try:
-        question = request.data.get('question', '').strip()
-        
-        if not question:
-            return Response(
-                {"answer": "Silakan ajukan pertanyaan yang lebih spesifik."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        logger.info(f"🔍 Processing question: '{question}'")
-        
-        # Get relevant documents from RAG system atau fallback
-        context = ""
-        relevant_docs = []
-        rag_status = "fallback"
-        
-        if retriever:
-            try:
-                docs = retriever.get_relevant_documents(question)
-                logger.info(f"📄 Retrieved {len(docs)} documents for question: '{question}'")
-                
-                # LOG DETAIL SETIAP DOKUMEN YANG DITEMUKAN
-                for i, doc in enumerate(docs):
-                    logger.info(f"   📝 Doc {i+1} Content: {doc.page_content}")
-                    logger.info(f"   🏷️  Doc {i+1} Metadata: {doc.metadata}")
-                    logger.info("   " + "-" * 50)
-                
-                context = "\n\n".join([f"Dokumen {i+1}:\n{d.page_content}" for i, d in enumerate(docs)])
-                relevant_docs = docs
-                rag_status = "active" if docs else "no_docs"
-                
-            except Exception as e:
-                logger.error(f"❌ Error retrieving documents: {e}")
-                context = "Sistem pencarian informasi sedang dalam perbaikan."
-                rag_status = "error"
-        else:
-            logger.warning("RAG system not available, using direct Gemini")
-            context = "Sistem pencarian informasi sedang dalam perbaikan."
-            rag_status = "not_available"
-        
-        # Prepare prompt dengan konteks yang lebih jelas
-        if context and rag_status == "active":
-            full_prompt = f"""
-INFORMASI KONTEKS YANG DITEMUKAN:
-{context}
-
-PERTANYAAN USER:
-{question}
-
-INSTRUKSI: 
-- Jawab pertanyaan berdasarkan informasi dalam konteks di atas
-- Jika informasi tersedia dalam konteks, berikan jawaban yang akurat
-- Jika informasi tidak tersedia dalam konteks, jelaskan bahwa informasi tidak ditemukan
-- Gunakan bahasa Indonesia yang jelas dan informatif
-
-JAWABAN:
-"""
-        else:
-            full_prompt = f"""
-PERTANYAAN USER:
-{question}
-
-JAWABAN (gunakan bahasa Indonesia yang jelas dan informatif. Jika tidak tahu jawabannya, jelaskan bahwa informasi tidak tersedia):
-"""
-        
-        # Get answer from Gemini
-        answer = "Maaf, sistem AI sedang tidak tersedia. Silakan coba lagi nanti."
-        if gemini_model:
-            try:
-                logger.info(f"🤖 Sending prompt to Gemini...")
-                response = gemini_model.invoke(full_prompt)
-                answer = response.content.strip()
-                logger.info(f"✅ Gemini response: {answer[:200]}...")
-            except Exception as gemini_error:
-                logger.error(f"❌ Gemini error: {gemini_error}")
-                answer = "Maaf, terjadi kesalahan saat memproses pertanyaan Anda."
-        
-        # Log the interaction
-        logger.info(f"📊 Summary - Q: '{question}' | A: {answer[:100]}... | RAG: {rag_status} | Docs: {len(relevant_docs)}")
-        
-        return Response({
-            "answer": answer,
-            "sources_count": len(relevant_docs),
-            "rag_system": rag_status
-        })
-        
-    except Exception as e:
-        logger.error(f"❌ Unexpected error in ask_question: {e}")
-        return Response(
-            {"answer": "Maaf, terjadi kesalahan sistem. Silakan coba lagi dalam beberapa saat."}, 
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-        
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)       
         
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
